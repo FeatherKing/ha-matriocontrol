@@ -65,8 +65,13 @@ class MatrioControlInputSelect(MatrioControlEntity, SelectEntity):
     @property
     def current_option(self) -> str | None:
         """Return the current selected option."""
-        # Return None to indicate unknown state - this allows input selection
-        # In a full implementation, this would track actual device state
+        # Get zone state from HNG sync data
+        zone_states = self.coordinator.data.get("zone_states", {})
+        zone_state = zone_states.get(self.zone_id)
+        
+        if zone_state and "input" in zone_state:
+            return zone_state["input"]
+        
         return None
 
     async def async_select_option(self, option: str) -> None:

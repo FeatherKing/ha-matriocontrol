@@ -21,9 +21,175 @@ import socket
 import time
 import struct
 import logging
-from typing import Dict, List
+from typing import Dict, List, Any
 
 _LOGGER = logging.getLogger(__name__)
+
+class UniversalHNGSyncDecoder:
+    """Universal HNG sync packet decoder that handles both 68-byte and 96-byte packets"""
+    
+    def __init__(self):
+        self.zones = {}
+        
+    def decode_hng_sync_packet(self, packet_hex: str, input_mappings: Dict[int, str]) -> Dict[str, Any]:
+        """Decode a complete HNG sync packet - automatically detects packet size"""
+        packet = bytes.fromhex(packet_hex)
+        
+        result = {
+            'packet_length': len(packet),
+            'packet_type': '68-byte' if len(packet) == 68 else '96-byte' if len(packet) == 96 else f'{len(packet)}-byte',
+            'zones': {}
+        }
+        
+        # Determine HNG section start based on packet size
+        # If this is an extracted HNG packet (starts with 820c), hng_start is always 0
+        if packet.startswith(b'\x82\x0c'):
+            hng_start = 0  # Extracted HNG packet: HNG section starts at byte 0
+        elif len(packet) == 96:
+            hng_start = 28  # Full 96-byte packet: HNG section starts at byte 28
+        elif len(packet) == 68:
+            hng_start = 0   # 68-byte packet: HNG section starts at byte 0
+        else:
+            _LOGGER.warning("Unknown packet size %d bytes", len(packet))
+            hng_start = 0
+        
+        # Decode each zone
+        for zone in range(8):
+            zone_num = zone + 1
+            zone_data = self.decode_zone(zone, packet, hng_start, len(packet), input_mappings)
+            result['zones'][zone_num] = zone_data
+        
+        return result
+    
+    def decode_zone(self, zone: int, packet: bytes, hng_start: int, packet_size: int, input_mappings: Dict[int, str]) -> Dict[str, Any]:
+        """Decode individual zone data based on packet size"""
+        
+        # Input state
+        if packet_size == 96:
+            input_start = hng_start + 2  # bytes 2-9 in HNG section
+        else:  # 68-byte packet
+            input_start = hng_start + 2  # bytes 2-9
+        input_val = packet[input_start + zone]
+        input_name = self.decode_input_selection(input_val, input_mappings)
+        
+        # Volume state
+        if packet_size == 96:
+            volume_start = hng_start + 10  # bytes 10-17 in HNG section
+        else:  # 68-byte packet
+            volume_start = hng_start + 10  # bytes 10-17
+        volume_val = packet[volume_start + zone]
+        volume = self.decode_volume_level(volume_val)
+        
+        # Power state
+        if packet_size == 96:
+            power_start = hng_start + 44  # bytes 44-51 in HNG section
+        else:  # 68-byte packet
+            power_start = hng_start + 50  # bytes 50-57
+        power_val = packet[power_start + zone]
+        power = self.decode_power_state(power_val, packet_size)
+        
+        # Balance state
+        if packet_size == 96:
+            balance_start = hng_start + 34  # bytes 34-41 in HNG section
+        else:  # 68-byte packet
+            balance_start = hng_start + 42  # bytes 42-49
+        balance_val = packet[balance_start + zone]
+        balance = self.decode_balance_state(balance_val, packet_size)
+        
+        # Mute state
+        if packet_size == 96:
+            mute_start = hng_start + 52  # bytes 52-59 in HNG section
+        else:  # 68-byte packet
+            mute_start = hng_start + 28  # bytes 28-35
+        mute_val = packet[mute_start + zone]
+        mute = self.decode_mute_state(mute_val, packet_size)
+        
+        return {
+            'zone_id': zone + 1,
+            'power': power,
+            'input': input_name,
+            'volume': volume,
+            'balance': balance,
+            'mute': mute,
+            'raw_data': {
+                'power': f"0x{power_val:02x}",
+                'input': f"0x{input_val:02x}",
+                'volume': f"0x{volume_val:02x}",
+                'balance': f"0x{balance_val:02x}",
+                'mute': f"0x{mute_val:02x}"
+            }
+        }
+    
+    def decode_power_state(self, power: int, packet_size: int) -> str:
+        """Decode zone power state based on packet size"""
+        if packet_size == 96:
+            # 96-byte packet: 0x02=ON, 0x01=OFF
+            if power == 0x02:
+                return "ON"
+            elif power == 0x01:
+                return "OFF"
+            else:
+                return f"UNKNOWN(0x{power:02x})"
+        else:
+            # 68-byte packet: 0x01=ON, 0x02=OFF (with reversed zone mapping)
+            if power == 0x01:
+                return "ON"
+            elif power == 0x02:
+                return "OFF"
+            else:
+                return f"UNKNOWN(0x{power:02x})"
+    
+    def decode_input_selection(self, input_val: int, input_mappings: Dict[int, str]) -> str:
+        """Decode zone input selection using device-provided input mappings"""
+        # HNG input values directly correspond to device input IDs (1-8)
+        # No mapping needed - input_val is already the correct input ID
+        result = input_mappings.get(input_val, f"UNKNOWN(0x{input_val:02x})")
+        _LOGGER.debug("Decoding input %d with mappings %s -> %s", input_val, input_mappings, result)
+        return result
+    
+    def decode_volume_level(self, volume: int) -> int:
+        """Decode zone volume level (with +1 offset)"""
+        # Volume is stored as (UI_volume + 1)
+        ui_volume = volume - 1
+        return max(0, ui_volume)  # Ensure non-negative
+    
+    def decode_balance_state(self, balance: int, packet_size: int) -> str:
+        """Decode zone balance state based on packet size"""
+        if packet_size == 96:
+            # 96-byte packet: 0x3d=MAX Right, 0x1f=Default
+            if balance == 0x3d:
+                return "MAX Right"
+            elif balance == 0x1f:
+                return "Default"
+            else:
+                return f"UNKNOWN(0x{balance:02x})"
+        else:
+            # 68-byte packet: 0x01=MAX Right, 0x02=Default
+            if balance == 0x01:
+                return "MAX Right"
+            elif balance == 0x02:
+                return "Default"
+            else:
+                return f"UNKNOWN(0x{balance:02x})"
+    
+    def decode_mute_state(self, mute: int, packet_size: int) -> str:
+        """Decode zone mute state based on packet size"""
+        if packet_size == 96:
+            # 96-byte packet: 0x01=Default, 0x02=Muted
+            if mute == 0x01:
+                return "DEFAULT"
+            elif mute == 0x02:
+                return "MUTED"
+            else:
+                return f"UNKNOWN(0x{mute:02x})"
+        else:
+            # 68-byte packet: 0x0d=Default, 0x02=Muted
+            if mute == 0x0d:
+                return "DEFAULT"
+            elif mute == 0x02:
+                return "MUTED"
+            else:
+                return f"UNKNOWN(0x{mute:02x})"
 
 class MatrioController:
     """Complete controller for Dayton Audio multi-zone amplifiers using Matrio Control protocol"""
@@ -40,6 +206,7 @@ class MatrioController:
         self.port = port
         self.socket = None
         self.zones = {}
+        self.hng_decoder = UniversalHNGSyncDecoder()
         
         # Default input mapping based on capture analysis
         self.inputs = {
@@ -1081,3 +1248,150 @@ class MatrioController:
             bool: True if command sent successfully
         """
         return self._send_audio_control_command(zone_id, 'treble', treble)
+    
+    def trigger_hng_sync(self) -> Dict[str, Any] | None:
+        """
+        Trigger HNG sync packet and decode all zone states
+        
+        Returns:
+            Dict containing decoded zone states or None if failed
+        """
+        if not self.socket:
+            _LOGGER.error("Not connected to device")
+            return None
+        
+        try:
+            _LOGGER.debug("Triggering HNG sync...")
+            
+            # Use the existing protocol command that we know works
+            init_packet = bytes.fromhex("189618200f0000005706000000000000000000004d43552b5041532b820affffff8926")
+            self.socket.send(init_packet)
+            
+            # Wait for HNG_SYNC_COMMAND response
+            self.socket.settimeout(5.0)
+            sync_response = self.socket.recv(1024)
+            if len(sync_response) == 0:
+                _LOGGER.debug("No sync response received")
+                return None
+            
+            _LOGGER.debug("Received sync response: %d bytes", len(sync_response))
+            
+            # Wait for ALLNAMES response
+            allnames_response = self.socket.recv(1024)
+            if len(allnames_response) == 0:
+                _LOGGER.debug("No ALLNAMES response received")
+                return None
+            
+            _LOGGER.debug("Received ALLNAMES response: %d bytes", len(allnames_response))
+            
+            # Look for HNG sync packet in the responses
+            combined_data = sync_response + allnames_response
+            _LOGGER.debug("Combined data: %d bytes", len(combined_data))
+            
+            # Check if this is a concatenated packet (multiple HNG sync packets)
+            if len(combined_data) > 100:  # Likely concatenated packets
+                _LOGGER.debug("Detected concatenated packets, extracting HNG sync...")
+                hng_hex = self._extract_hng_sync_packet(combined_data)
+                if not hng_hex:
+                    _LOGGER.warning("Could not extract HNG sync packet from concatenated data")
+                    return None
+            else:
+                hng_hex = combined_data.hex()
+            
+            # Get input mappings from coordinator if available
+            input_mappings = getattr(self, 'input_mappings', None)
+            _LOGGER.debug("Using input mappings in trigger_hng_sync: %s", input_mappings)
+            
+            # Decode the packet
+            result = self.hng_decoder.decode_hng_sync_packet(hng_hex, input_mappings)
+            
+            _LOGGER.debug("HNG sync decoded: %s packet with %d zones", 
+                         result['packet_type'], len(result['zones']))
+            
+            return result
+                
+        except Exception as e:
+            _LOGGER.error("HNG sync failed: %s", e)
+            return None
+    
+    def _extract_hng_sync_packet(self, data: bytes) -> str | None:
+        """
+        Extract HNG sync packet from concatenated packet data
+        
+        Args:
+            data: Raw packet data that may contain multiple packets
+            
+        Returns:
+            Hex string of the HNG sync packet or None if not found
+        """
+        try:
+            # Look for HNG sync packet signature (820c)
+            hng_signature = b'\x82\x0c'
+            
+            # Find the first occurrence of HNG sync signature
+            hng_pos = data.find(hng_signature)
+            if hng_pos == -1:
+                _LOGGER.warning("HNG sync signature not found in packet data")
+                return None
+            
+            # Extract the HNG sync packet - try both 68-byte and 96-byte sizes
+            hng_start = hng_pos
+            
+            # Try 96-byte packet first (more common in newer devices)
+            hng_end_96 = hng_start + 96
+            if hng_end_96 <= len(data):
+                hng_packet = data[hng_start:hng_end_96]
+                _LOGGER.debug("Extracted 96-byte HNG sync packet: %d bytes", len(hng_packet))
+                return hng_packet.hex()
+            
+            # Fall back to 68-byte packet
+            hng_end_68 = hng_start + 68
+            if hng_end_68 <= len(data):
+                hng_packet = data[hng_start:hng_end_68]
+                _LOGGER.debug("Extracted 68-byte HNG sync packet: %d bytes", len(hng_packet))
+                return hng_packet.hex()
+            
+            _LOGGER.warning("HNG sync packet extends beyond received data")
+            return None
+            
+        except Exception as e:
+            _LOGGER.error("Failed to extract HNG sync packet: %s", e)
+            return None
+    
+    def get_zone_states(self, input_mappings: Dict[int, str]) -> Dict[str, Any]:
+        """
+        Get current state of all zones using HNG sync
+        
+        Args:
+            input_mappings: Input mappings from device for proper input name decoding
+            
+        Returns:
+            Dict containing zone states or empty dict if failed
+        """
+        # Store input mappings for use in trigger_hng_sync
+        if input_mappings:
+            self.input_mappings = input_mappings
+            _LOGGER.debug("Stored input mappings: %s", input_mappings)
+        else:
+            _LOGGER.warning("No input mappings provided to get_zone_states")
+        
+        hng_result = self.trigger_hng_sync()
+        if hng_result and 'zones' in hng_result:
+            return hng_result['zones']
+        return {}
+    
+    def get_zone_state(self, zone_id: int, input_mappings: Dict[int, str]) -> Dict[str, Any] | None:
+        """
+        Get current state of a specific zone using HNG sync
+        
+        Args:
+            zone_id: Zone ID (1-8)
+            input_mappings: Input mappings from device for proper input name decoding
+            
+        Returns:
+            Dict containing zone state or None if failed
+        """
+        zone_states = self.get_zone_states(input_mappings)
+        if zone_states and zone_id in zone_states:
+            return zone_states[zone_id]
+        return None

@@ -65,11 +65,20 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
     @property
     def state(self) -> MediaPlayerState:
         """Return the state of the device."""
-        # For now, assume device is always on when connected
-        # In a full implementation, this would track actual zone power state
-        if self.coordinator.data.get("connected", False):
+        if not self.coordinator.data.get("connected", False):
+            return MediaPlayerState.OFF
+        
+        # Get zone state from HNG sync data
+        zone_states = self.coordinator.data.get("zone_states", {})
+        zone_state = zone_states.get(self.zone_id)
+        
+        if zone_state and zone_state.get("power") == "ON":
             return MediaPlayerState.ON
-        return MediaPlayerState.OFF
+        elif zone_state and zone_state.get("power") == "OFF":
+            return MediaPlayerState.OFF
+        else:
+            # Fallback to connected state if no zone state available
+            return MediaPlayerState.ON if self.coordinator.data.get("connected", False) else MediaPlayerState.OFF
 
     @property
     def source_list(self) -> list[str]:
@@ -85,21 +94,50 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
     @property
     def source(self) -> str | None:
         """Return the current input source."""
-        # Return None to indicate unknown state - this allows input selection
-        # In a full implementation, this would track actual device state
+        # Get zone state from HNG sync data
+        zone_states = self.coordinator.data.get("zone_states", {})
+        zone_state = zone_states.get(self.zone_id)
+        
+        _LOGGER.debug("Zone %d source check - zone_states: %s, zone_state: %s", 
+                     self.zone_id, zone_states, zone_state)
+        
+        if zone_state and "input" in zone_state:
+            _LOGGER.debug("Zone %d returning input: %s", self.zone_id, zone_state["input"])
+            return zone_state["input"]
+        
+        _LOGGER.debug("Zone %d returning None for source", self.zone_id)
         return None
 
     @property
     def volume_level(self) -> float | None:
         """Volume level of the media player (0..1)."""
-        # This would be determined by actual device state
-        # For now, return a default value
-        return 0.5
+        # Get zone state from HNG sync data
+        zone_states = self.coordinator.data.get("zone_states", {})
+        zone_state = zone_states.get(self.zone_id)
+        
+        _LOGGER.debug("Zone %d volume check - zone_states: %s, zone_state: %s", 
+                     self.zone_id, zone_states, zone_state)
+        
+        if zone_state and "volume" in zone_state:
+            # Convert from 0..38 range to 0..1 range
+            volume = zone_state["volume"]
+            volume_level = volume / VOLUME_MAX if VOLUME_MAX > 0 else 0.0
+            _LOGGER.debug("Zone %d returning volume: %s -> %s", self.zone_id, volume, volume_level)
+            return volume_level
+        
+        _LOGGER.debug("Zone %d returning None for volume", self.zone_id)
+        return None
 
     @property
     def is_volume_muted(self) -> bool | None:
         """Boolean if volume is currently muted."""
-        # This would be determined by actual device state
+        # Get zone state from HNG sync data
+        zone_states = self.coordinator.data.get("zone_states", {})
+        zone_state = zone_states.get(self.zone_id)
+        
+        if zone_state and "mute" in zone_state:
+            return zone_state["mute"] == "MUTED"
+        
         return False
 
     async def async_turn_on(self) -> None:

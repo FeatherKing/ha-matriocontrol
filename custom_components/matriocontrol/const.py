@@ -47,16 +47,16 @@ ZONES = {
     8: "Zone 8"
 }
 
-# Input mappings (default names, will be updated from device)
+# Input mappings (fallback names, actual names come from device via ALLNAMES)
 INPUTS = {
-    1: "TV",
-    2: "Google Music", 
+    1: "Input1",
+    2: "Input2", 
     3: "Input3",
     4: "Input4",
     5: "Input5",
     6: "Input6",
     7: "Input7",
-    8: "Wi-Fi"
+    8: "Input8"
 }
 
 # Volume range (0-38 as per MatrioController)
