@@ -36,12 +36,15 @@ class MatrioControlDataUpdateCoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self):
         """Update data via library."""
+        _LOGGER.debug("Coordinator _async_update_data called")
         try:
             # Check if we need to connect
             if not self.controller.socket:
+                _LOGGER.debug("No socket connection, attempting to connect")
                 # Run connection in executor to avoid blocking event loop
                 connected = await self.hass.async_add_executor_job(self.controller.connect)
                 if not connected:
+                    _LOGGER.debug("Connection failed")
                     return {
                         "connected": False,
                         "zones": {},
@@ -49,6 +52,7 @@ class MatrioControlDataUpdateCoordinator(DataUpdateCoordinator):
                         "device_info": {},
                         "last_heartbeat": None,
                     }
+                _LOGGER.debug("Connection successful")
             
             # Query device information to check connectivity
             device_info = {}
@@ -87,7 +91,7 @@ class MatrioControlDataUpdateCoordinator(DataUpdateCoordinator):
                         _LOGGER.error("Failed to reconnect to device on attempt %d", attempt + 1)
                         raise UpdateFailed("Failed to reconnect to device")
             
-            return {
+            result = {
                 "connected": True,
                 "zones": {f"zone_{i}": names.get(f"zone_{i-1}", f"Zone {i}") for i in range(1, 9)},
                 "inputs": self.controller.get_available_inputs(),
@@ -97,8 +101,11 @@ class MatrioControlDataUpdateCoordinator(DataUpdateCoordinator):
                 "input_mappings": {i: names.get(f"input_{i}", f"Input{i}") for i in range(1, 9)},
                 "zone_names": {i: names.get(f"zone_{i-1}", f"Zone {i}") for i in range(1, 9)},
             }
+            _LOGGER.debug("Coordinator update successful, returning data: %s", result)
+            return result
             
         except Exception as err:
+            _LOGGER.debug("Coordinator update failed with error: %s", err)
             _LOGGER.error("Error communicating with Matrio device: %s", err)
             return {
                 "connected": False,

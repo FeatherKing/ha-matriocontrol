@@ -65,13 +65,14 @@ class MatrioControlInputSelect(MatrioControlEntity, SelectEntity):
     @property
     def current_option(self) -> str | None:
         """Return the current selected option."""
-        # This would be determined by actual device state
-        # For now, return the first available option
-        options = self.options
-        return options[0] if options else None
+        # Return None to indicate unknown state - this allows input selection
+        # In a full implementation, this would track actual device state
+        return None
 
     async def async_select_option(self, option: str) -> None:
         """Change the selected option."""
+        _LOGGER.debug("async_select_option called: zone_id=%s, option='%s'", self.zone_id, option)
+        
         # Find input ID by name using input_mappings if available
         input_mappings = self.coordinator.data.get("input_mappings", {})
         if input_mappings:
@@ -81,6 +82,7 @@ class MatrioControlInputSelect(MatrioControlEntity, SelectEntity):
                 if name == option:
                     input_id = iid
                     break
+            _LOGGER.debug("Found input_id=%s using input_mappings", input_id)
         else:
             # Fall back to inputs
             inputs = self.coordinator.data.get("inputs", {})
@@ -89,9 +91,14 @@ class MatrioControlInputSelect(MatrioControlEntity, SelectEntity):
                 if name == option:
                     input_id = iid
                     break
+            _LOGGER.debug("Found input_id=%s using inputs fallback", input_id)
         
         if input_id:
+            _LOGGER.debug("Calling controller.set_input: zone_id=%s, input_id=%s", self.zone_id, input_id)
             await self.hass.async_add_executor_job(
                 self.coordinator.controller.set_input, self.zone_id, input_id
             )
+            _LOGGER.debug("Requesting coordinator refresh after input change")
             await self.coordinator.async_request_refresh()
+        else:
+            _LOGGER.warning("Could not find input_id for option '%s'", option)

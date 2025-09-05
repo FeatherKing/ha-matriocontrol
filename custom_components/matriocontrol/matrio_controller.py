@@ -20,7 +20,10 @@ Date: 2025-01-02
 import socket
 import time
 import struct
+import logging
 from typing import Dict, List
+
+_LOGGER = logging.getLogger(__name__)
 
 class MatrioController:
     """Complete controller for Dayton Audio multi-zone amplifiers using Matrio Control protocol"""
@@ -307,21 +310,26 @@ class MatrioController:
             zone_id: Zone ID (1-8)
             input_id: Input ID (1-8)
         """
+        _LOGGER.debug("_send_input_command called: zone_id=%s, input_id=%s", zone_id, input_id)
+        
         if not self.socket:
+            _LOGGER.debug("No socket connection available")
             return False
         
         if zone_id < 1 or zone_id > 8:
-            print(f"Invalid zone ID: {zone_id}. Must be 1-8")
+            _LOGGER.debug("Invalid zone ID: %s. Must be 1-8", zone_id)
             return False
         
         if input_id < 1 or input_id > 8:
-            print(f"Invalid input ID: {input_id}. Must be 1-8")
+            _LOGGER.debug("Invalid input ID: %s. Must be 1-8", input_id)
             return False
         
         # Create zone pattern: 01 at target zone position, 02 elsewhere
         # Pattern is 8 bytes: 0202010202020202 for zone 3, 0202020102020202 for zone 4, etc.
         zone_pattern = [0x02] * 8
         zone_pattern[zone_id - 1] = 0x01  # zone_id is 1-based, array is 0-based
+        
+        _LOGGER.debug("Zone pattern: %s", [hex(b) for b in zone_pattern])
         
         # Protocol format based on capture analysis:
         # Header (4 bytes) + Length (4 bytes) + Data (12 bytes) + Payload
@@ -332,14 +340,25 @@ class MatrioController:
         
         packet = header + length.to_bytes(4, 'little') + data + payload
         
+        _LOGGER.debug("Sending packet: %s", packet.hex())
+        _LOGGER.debug("Packet length: %s bytes", len(packet))
+        
         try:
-            self.socket.send(packet)
+            bytes_sent = self.socket.send(packet)
+            _LOGGER.debug("Sent %s bytes to device", bytes_sent)
+            
             # Wait for response
             self.socket.settimeout(2.0)
             response = self.socket.recv(1024)
-            return len(response) > 0
+            
+            if len(response) > 0:
+                _LOGGER.debug("Received response: %s...", response.hex()[:50])
+                return True
+            else:
+                _LOGGER.debug("No response received from device")
+                return False
         except Exception as e:
-            print(f"Input command failed: {e}")
+            _LOGGER.debug("Input command failed with exception: %s", e)
             return False
     
     def _send_power_command(self, zone_id: int, power_on: bool) -> bool:
@@ -615,13 +634,22 @@ class MatrioController:
     
     def set_input(self, zone_id: int, input_id: int) -> bool:
         """Set input for individual zone (1-8)"""
+        _LOGGER.debug("set_input called: zone_id=%s, input_id=%s", zone_id, input_id)
+        
         if input_id < 1 or input_id > 8:
-            print(f"Invalid input ID: {input_id}. Must be 1-8")
+            _LOGGER.debug("Invalid input ID: %s. Must be 1-8", input_id)
             return False
+        
+        input_name = self.inputs.get(input_id, f"Input {input_id}")
+        _LOGGER.debug("Attempting to set Zone %s to %s (ID: %s)", zone_id, input_name, input_id)
+        
         result = self._send_input_command(zone_id, input_id)
+        
         if result:
-            input_name = self.inputs.get(input_id, f"Input {input_id}")
-            print(f"Zone {zone_id} input: {input_name}")
+            _LOGGER.debug("SUCCESS: Zone %s input set to %s", zone_id, input_name)
+        else:
+            _LOGGER.debug("FAILED: Zone %s input change failed", zone_id)
+        
         return result
     
     

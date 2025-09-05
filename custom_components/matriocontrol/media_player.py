@@ -85,10 +85,9 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
     @property
     def source(self) -> str | None:
         """Return the current input source."""
-        # This would be determined by actual device state
-        # For now, return the first input as default
-        inputs = self.coordinator.data.get("inputs", INPUTS)
-        return list(inputs.values())[0] if inputs else None
+        # Return None to indicate unknown state - this allows input selection
+        # In a full implementation, this would track actual device state
+        return None
 
     @property
     def volume_level(self) -> float | None:
@@ -135,8 +134,12 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
 
     async def async_select_source(self, source: str) -> None:
         """Select input source."""
+        _LOGGER.debug("async_select_source called: zone_id=%s, source='%s'", self.zone_id, source)
+        
         # Find input ID by name using input_mappings if available
         input_mappings = self.coordinator.data.get("input_mappings", {})
+        _LOGGER.debug("input_mappings: %s", input_mappings)
+        
         if input_mappings:
             # Use input_mappings (device names)
             input_id = None
@@ -144,17 +147,25 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
                 if name == source:
                     input_id = iid
                     break
+            _LOGGER.debug("Found input_id %s using input_mappings", input_id)
         else:
             # Fall back to inputs
             inputs = self.coordinator.data.get("inputs", INPUTS)
+            _LOGGER.debug("Using fallback inputs: %s", inputs)
             input_id = None
             for iid, name in inputs.items():
                 if name == source:
                     input_id = iid
                     break
+            _LOGGER.debug("Found input_id %s using fallback inputs", input_id)
         
         if input_id:
+            _LOGGER.debug("Calling controller.set_input(%s, %s)", self.zone_id, input_id)
             await self.hass.async_add_executor_job(
                 self.coordinator.controller.set_input, self.zone_id, input_id
             )
+            _LOGGER.debug("Requesting coordinator refresh")
             await self.coordinator.async_request_refresh()
+            _LOGGER.debug("async_select_source completed for zone %s", self.zone_id)
+        else:
+            _LOGGER.debug("No input_id found for source '%s'", source)
