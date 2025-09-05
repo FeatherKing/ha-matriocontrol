@@ -8,6 +8,7 @@ from homeassistant.components.number import NumberEntity, NumberMode
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.entity import EntityCategory
 
 from .const import DOMAIN, ZONES, BALANCE_MIN, BALANCE_MAX, BASS_TREBLE_MIN, BASS_TREBLE_MAX
 from .coordinator import MatrioControlDataUpdateCoordinator
@@ -51,6 +52,7 @@ class MatrioControlBassNumber(MatrioControlEntity, NumberEntity):
         self._attr_native_max_value = BASS_TREBLE_MAX
         self._attr_native_step = 1
         self._attr_mode = NumberMode.SLIDER
+        self._attr_entity_category = EntityCategory.CONFIG
 
     @property
     def name(self) -> str:
@@ -94,6 +96,7 @@ class MatrioControlTrebleNumber(MatrioControlEntity, NumberEntity):
         self._attr_native_max_value = BASS_TREBLE_MAX
         self._attr_native_step = 1
         self._attr_mode = NumberMode.SLIDER
+        self._attr_entity_category = EntityCategory.CONFIG
 
     @property
     def name(self) -> str:
@@ -137,6 +140,7 @@ class MatrioControlBalanceNumber(MatrioControlEntity, NumberEntity):
         self._attr_native_max_value = BALANCE_MAX
         self._attr_native_step = 1
         self._attr_mode = NumberMode.SLIDER
+        self._attr_entity_category = EntityCategory.CONFIG
 
     @property
     def name(self) -> str:

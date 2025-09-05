@@ -105,6 +105,12 @@ class UniversalHNGSyncDecoder:
         # Bass and treble state - decode from specific byte positions
         bass, treble = self.decode_bass_treble(zone, packet, hng_start, packet_size)
         
+        # Get raw bass and treble values for raw_data
+        bass_start = self.get_bass_start(hng_start, packet_size)
+        treble_start = self.get_treble_start(hng_start, packet_size)
+        bass_val = packet[bass_start + zone]
+        treble_val = packet[treble_start + zone]
+        
         return {
             'zone_id': zone + 1,
             'power': power,
@@ -119,7 +125,9 @@ class UniversalHNGSyncDecoder:
                 'input': f"0x{input_val:02x}",
                 'volume': f"0x{volume_val:02x}",
                 'balance': f"0x{balance_val:02x}",
-                'mute': f"0x{mute_val:02x}"
+                'mute': f"0x{mute_val:02x}",
+                'bass': f"0x{bass_val:02x}",
+                'treble': f"0x{treble_val:02x}"
             }
         }
     
