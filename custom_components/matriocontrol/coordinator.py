@@ -55,37 +55,37 @@ class MatrioControlDataUpdateCoordinator(DataUpdateCoordinator):
             names = {}
             heartbeat_received = False
             
-            try:
-                # Try to get device info (this will test connectivity)
-                device_info = await self.hass.async_add_executor_job(self.controller.query_device_info)
-                
-                # Get zone and input names
-                names = await self.hass.async_add_executor_job(self.controller.query_all_names)
-                
-                # Update the controller's input mappings with actual device names
-                if names:
-                    for i in range(1, 9):
-                        input_key = f"input_{i}"
-                        if input_key in names:
-                            self.controller.inputs[i] = names[input_key]
-                
-                heartbeat_received = True
-            except (ConnectionError, RuntimeError, NotImplementedError) as e:
-                _LOGGER.warning("Failed to query device info: %s", e)
-                # If query fails, try to reconnect
-                await self.hass.async_add_executor_job(self.controller.disconnect)
-                connected = await self.hass.async_add_executor_job(self.controller.connect)
-                if not connected:
-                    return {
-                        "connected": False,
-                        "zones": {},
-                        "inputs": self.controller.get_available_inputs(),
-                        "device_info": device_info,
-                        "names": names,
-                        "last_heartbeat": None,
-                    }
-                # After reconnection, try heartbeat check instead
-                heartbeat_received = await self.hass.async_add_executor_job(self.controller.check_heartbeat)
+            # Retry ALLNAMES command up to 2 times
+            for attempt in range(2):
+                try:
+                    # Try to get device info (this will test connectivity)
+                    device_info = await self.hass.async_add_executor_job(self.controller.query_device_info)
+                    
+                    # Get zone and input names - this is critical
+                    names = await self.hass.async_add_executor_job(self.controller.query_all_names)
+                    
+                    # Update the controller's input mappings with actual device names
+                    if names:
+                        for i in range(1, 9):
+                            input_key = f"input_{i}"
+                            if input_key in names:
+                                self.controller.inputs[i] = names[input_key]
+                    
+                    heartbeat_received = True
+                    break  # Success, exit retry loop
+                    
+                except (ConnectionError, RuntimeError, NotImplementedError) as e:
+                    _LOGGER.warning("Attempt %d failed to query device info: %s", attempt + 1, e)
+                    if attempt == 1:  # Last attempt failed
+                        _LOGGER.error("ALLNAMES command failed after 2 attempts - integration cannot function without zone names")
+                        raise UpdateFailed("Device did not respond to ALLNAMES command after 2 attempts")
+                    
+                    # Try to reconnect before retry
+                    await self.hass.async_add_executor_job(self.controller.disconnect)
+                    connected = await self.hass.async_add_executor_job(self.controller.connect)
+                    if not connected:
+                        _LOGGER.error("Failed to reconnect to device on attempt %d", attempt + 1)
+                        raise UpdateFailed("Failed to reconnect to device")
             
             return {
                 "connected": True,
