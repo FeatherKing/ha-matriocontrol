@@ -32,7 +32,7 @@ async def async_setup_entry(
 
 
 class MatrioControlDeviceStatusBinarySensor(MatrioControlEntity, BinarySensorEntity):
-    """Representation of a DAX88 device connectivity status."""
+    """Representation of a Matrio device connectivity status."""
 
     def __init__(
         self, 

@@ -58,7 +58,7 @@ class MatrioController:
             # Create a socket to determine the local IP
             # Connect to a remote address to determine the local interface
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                # Connect to the DAX88 device to use the same network interface
+                # Connect to the Matrio device to use the same network interface
                 s.connect((self.ip, 80))
                 local_ip = s.getsockname()[0]
                 return local_ip

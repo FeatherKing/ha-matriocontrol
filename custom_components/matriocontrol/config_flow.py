@@ -12,7 +12,7 @@ from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import config_validation as cv
 
 from .const import DEFAULT_PORT, DEFAULT_ZONES, DOMAIN
-from .dax88_controller import DAX88Controller
+from .matrio_controller import MatrioController
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -45,18 +45,18 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         try:
             # Test connection
-            controller = DAX88Controller(
+            controller = MatrioController(
                 user_input[CONF_HOST], user_input[CONF_PORT]
             )
             await self.hass.async_add_executor_job(controller.connect)
             await self.hass.async_add_executor_job(controller.disconnect)
         except Exception as ex:
-            _LOGGER.error("Failed to connect to DAX88: %s", ex)
+            _LOGGER.error("Failed to connect to Matrio device: %s", ex)
             errors["base"] = "cannot_connect"
 
         if not errors:
             return self.async_create_entry(
-                title=f"DAX88 ({user_input[CONF_HOST]})", data=user_input
+                title=f"Matrio Control ({user_input[CONF_HOST]})", data=user_input
             )
 
         return self.async_show_form(

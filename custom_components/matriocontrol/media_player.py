@@ -36,7 +36,7 @@ async def async_setup_entry(
 
 
 class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
-    """Representation of a DAX88 zone as a media player."""
+    """Representation of a Matrio zone as a media player."""
 
     def __init__(
         self, 
