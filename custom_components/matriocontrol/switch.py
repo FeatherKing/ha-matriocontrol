@@ -25,10 +25,11 @@ async def async_setup_entry(
     coordinator: MatrioControlDataUpdateCoordinator = hass.data[DOMAIN][config_entry.entry_id]
     
     entities = []
-    for zone_id, zone_name in ZONES.items():
+    # Create entities for all 8 zones - names will be updated from coordinator data
+    for zone_id in range(1, 9):
         entities.extend([
-            MatrioControlZoneSwitch(coordinator, zone_id, zone_name),
-            MatrioControlMuteSwitch(coordinator, zone_id, zone_name),
+            MatrioControlZoneSwitch(coordinator, zone_id),
+            MatrioControlMuteSwitch(coordinator, zone_id),
         ])
     
     async_add_entities(entities)
@@ -40,13 +41,18 @@ class MatrioControlZoneSwitch(MatrioControlEntity, SwitchEntity):
     def __init__(
         self, 
         coordinator: MatrioControlDataUpdateCoordinator, 
-        zone_id: int, 
-        zone_name: str
+        zone_id: int
     ) -> None:
         """Initialize the zone switch."""
         super().__init__(coordinator, zone_id)
-        self._attr_name = f"{zone_name} Power"
         self._attr_unique_id = f"{coordinator.entry.entry_id}_zone_{zone_id}_power"
+
+    @property
+    def name(self) -> str:
+        """Return the name of the entity."""
+        zone_names = self.coordinator.data.get("zone_names", {})
+        zone_name = zone_names.get(self.zone_id, f"Zone {self.zone_id}")
+        return f"{zone_name} Power"
 
     @property
     def is_on(self) -> bool | None:
@@ -76,13 +82,18 @@ class MatrioControlMuteSwitch(MatrioControlEntity, SwitchEntity):
     def __init__(
         self, 
         coordinator: MatrioControlDataUpdateCoordinator, 
-        zone_id: int, 
-        zone_name: str
+        zone_id: int
     ) -> None:
         """Initialize the mute switch."""
         super().__init__(coordinator, zone_id)
-        self._attr_name = f"{zone_name} Mute"
         self._attr_unique_id = f"{coordinator.entry.entry_id}_zone_{zone_id}_mute"
+
+    @property
+    def name(self) -> str:
+        """Return the name of the entity."""
+        zone_names = self.coordinator.data.get("zone_names", {})
+        zone_name = zone_names.get(self.zone_id, f"Zone {self.zone_id}")
+        return f"{zone_name} Mute"
 
     @property
     def is_on(self) -> bool | None:

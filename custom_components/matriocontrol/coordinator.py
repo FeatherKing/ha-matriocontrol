@@ -94,6 +94,8 @@ class MatrioControlDataUpdateCoordinator(DataUpdateCoordinator):
                 "device_info": device_info,
                 "names": names,
                 "last_heartbeat": heartbeat_received,
+                "input_mappings": {i: names.get(f"input_{i}", f"Input{i}") for i in range(1, 9)},
+                "zone_names": {i: names.get(f"zone_{i-1}", f"Zone {i}") for i in range(1, 9)},
             }
             
         except Exception as err:

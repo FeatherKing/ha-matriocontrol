@@ -615,12 +615,13 @@ class MatrioController:
     
     def set_input(self, zone_id: int, input_id: int) -> bool:
         """Set input for individual zone (1-8)"""
-        if input_id not in self.inputs:
-            print(f"Invalid input ID: {input_id}")
+        if input_id < 1 or input_id > 8:
+            print(f"Invalid input ID: {input_id}. Must be 1-8")
             return False
         result = self._send_input_command(zone_id, input_id)
         if result:
-            print(f"Zone {zone_id} input: {self.inputs[input_id]}")
+            input_name = self.inputs.get(input_id, f"Input {input_id}")
+            print(f"Zone {zone_id} input: {input_name}")
         return result
     
     

@@ -25,12 +25,13 @@ async def async_setup_entry(
     coordinator: MatrioControlDataUpdateCoordinator = hass.data[DOMAIN][config_entry.entry_id]
     
     entities = []
-    for zone_id, zone_name in ZONES.items():
+    # Create entities for all 8 zones - names will be updated from coordinator data
+    for zone_id in range(1, 9):
         entities.extend([
-            MatrioControlVolumeNumber(coordinator, zone_id, zone_name),
-            MatrioControlBassNumber(coordinator, zone_id, zone_name),
-            MatrioControlTrebleNumber(coordinator, zone_id, zone_name),
-            MatrioControlBalanceNumber(coordinator, zone_id, zone_name),
+            MatrioControlVolumeNumber(coordinator, zone_id),
+            MatrioControlBassNumber(coordinator, zone_id),
+            MatrioControlTrebleNumber(coordinator, zone_id),
+            MatrioControlBalanceNumber(coordinator, zone_id),
         ])
     
     async_add_entities(entities)
@@ -42,17 +43,22 @@ class MatrioControlVolumeNumber(MatrioControlEntity, NumberEntity):
     def __init__(
         self, 
         coordinator: MatrioControlDataUpdateCoordinator, 
-        zone_id: int, 
-        zone_name: str
+        zone_id: int
     ) -> None:
         """Initialize the volume number."""
         super().__init__(coordinator, zone_id)
-        self._attr_name = f"{zone_name} Volume"
         self._attr_unique_id = f"{coordinator.entry.entry_id}_zone_{zone_id}_volume"
         self._attr_native_min_value = VOLUME_MIN
         self._attr_native_max_value = VOLUME_MAX
         self._attr_native_step = 1
         self._attr_mode = NumberMode.SLIDER
+
+    @property
+    def name(self) -> str:
+        """Return the name of the entity."""
+        zone_names = self.coordinator.data.get("zone_names", {})
+        zone_name = zone_names.get(self.zone_id, f"Zone {self.zone_id}")
+        return f"{zone_name} Volume"
 
     @property
     def native_value(self) -> float | None:
@@ -74,17 +80,22 @@ class MatrioControlBassNumber(MatrioControlEntity, NumberEntity):
     def __init__(
         self, 
         coordinator: MatrioControlDataUpdateCoordinator, 
-        zone_id: int, 
-        zone_name: str
+        zone_id: int
     ) -> None:
         """Initialize the bass number."""
         super().__init__(coordinator, zone_id)
-        self._attr_name = f"{zone_name} Bass"
         self._attr_unique_id = f"{coordinator.entry.entry_id}_zone_{zone_id}_bass"
         self._attr_native_min_value = BASS_TREBLE_MIN
         self._attr_native_max_value = BASS_TREBLE_MAX
         self._attr_native_step = 1
         self._attr_mode = NumberMode.SLIDER
+
+    @property
+    def name(self) -> str:
+        """Return the name of the entity."""
+        zone_names = self.coordinator.data.get("zone_names", {})
+        zone_name = zone_names.get(self.zone_id, f"Zone {self.zone_id}")
+        return f"{zone_name} Bass"
 
     @property
     def native_value(self) -> float | None:
@@ -106,17 +117,22 @@ class MatrioControlTrebleNumber(MatrioControlEntity, NumberEntity):
     def __init__(
         self, 
         coordinator: MatrioControlDataUpdateCoordinator, 
-        zone_id: int, 
-        zone_name: str
+        zone_id: int
     ) -> None:
         """Initialize the treble number."""
         super().__init__(coordinator, zone_id)
-        self._attr_name = f"{zone_name} Treble"
         self._attr_unique_id = f"{coordinator.entry.entry_id}_zone_{zone_id}_treble"
         self._attr_native_min_value = BASS_TREBLE_MIN
         self._attr_native_max_value = BASS_TREBLE_MAX
         self._attr_native_step = 1
         self._attr_mode = NumberMode.SLIDER
+
+    @property
+    def name(self) -> str:
+        """Return the name of the entity."""
+        zone_names = self.coordinator.data.get("zone_names", {})
+        zone_name = zone_names.get(self.zone_id, f"Zone {self.zone_id}")
+        return f"{zone_name} Treble"
 
     @property
     def native_value(self) -> float | None:
@@ -138,17 +154,22 @@ class MatrioControlBalanceNumber(MatrioControlEntity, NumberEntity):
     def __init__(
         self, 
         coordinator: MatrioControlDataUpdateCoordinator, 
-        zone_id: int, 
-        zone_name: str
+        zone_id: int
     ) -> None:
         """Initialize the balance number."""
         super().__init__(coordinator, zone_id)
-        self._attr_name = f"{zone_name} Balance"
         self._attr_unique_id = f"{coordinator.entry.entry_id}_zone_{zone_id}_balance"
         self._attr_native_min_value = BALANCE_MIN
         self._attr_native_max_value = BALANCE_MAX
         self._attr_native_step = 1
         self._attr_mode = NumberMode.SLIDER
+
+    @property
+    def name(self) -> str:
+        """Return the name of the entity."""
+        zone_names = self.coordinator.data.get("zone_names", {})
+        zone_name = zone_names.get(self.zone_id, f"Zone {self.zone_id}")
+        return f"{zone_name} Balance"
 
     @property
     def native_value(self) -> float | None:
