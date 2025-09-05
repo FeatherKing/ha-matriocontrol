@@ -1,0 +1,7 @@
+{
+  "name": "Matrio Control",
+  "content_in_root": false,
+  "filename": "matriocontrol",
+  "country": ["US"],
+  "homeassistant": "2023.1.0"
+}
