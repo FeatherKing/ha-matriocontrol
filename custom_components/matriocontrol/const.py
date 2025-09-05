@@ -60,7 +60,6 @@ INPUTS = {
 }
 
 # Volume range (0-38 as per MatrioController)
-VOLUME_MIN = 0
 VOLUME_MAX = 38
 
 # Balance range (-100 to +100 as per MatrioController)

@@ -89,10 +89,8 @@ class UniversalHNGSyncDecoder:
         power = self.decode_power_state(power_val, packet_size)
         
         # Balance state
-        if packet_size == 96:
-            balance_start = hng_start + 34  # bytes 34-41 in HNG section
-        else:  # 68-byte packet
-            balance_start = hng_start + 42  # bytes 42-49
+        # Confirmed by differential analysis: balance is at position 34 + zone_index
+        balance_start = hng_start + 34
         balance_val = packet[balance_start + zone]
         balance = self.decode_balance_state(balance_val, packet_size)
         
@@ -104,6 +102,9 @@ class UniversalHNGSyncDecoder:
         mute_val = packet[mute_start + zone]
         mute = self.decode_mute_state(mute_val, packet_size)
         
+        # Bass and treble state - decode from specific byte positions
+        bass, treble = self.decode_bass_treble(zone, packet, hng_start, packet_size)
+        
         return {
             'zone_id': zone + 1,
             'power': power,
@@ -111,6 +112,8 @@ class UniversalHNGSyncDecoder:
             'volume': volume,
             'balance': balance,
             'mute': mute,
+            'bass': bass,
+            'treble': treble,
             'raw_data': {
                 'power': f"0x{power_val:02x}",
                 'input': f"0x{input_val:02x}",
@@ -154,21 +157,22 @@ class UniversalHNGSyncDecoder:
         return max(0, ui_volume)  # Ensure non-negative
     
     def decode_balance_state(self, balance: int, packet_size: int) -> str:
-        """Decode zone balance state based on packet size"""
-        if packet_size == 96:
-            # 96-byte packet: 0x3d=MAX Right, 0x1f=Default
-            if balance == 0x3d:
-                return "MAX Right"
-            elif balance == 0x1f:
-                return "Default"
-            else:
-                return f"UNKNOWN(0x{balance:02x})"
+        """Decode zone balance state based on differential analysis"""
+        # Based on differential analysis, balance values are:
+        # 0x01 = MAX Left (-100), 0x1f = Center (0), 0x3d = MAX Right (+100)
+        if balance == 0x3d:
+            return "MAX Right"
+        elif balance == 0x1f:
+            return "Default"
+        elif balance == 0x01:
+            return "MAX Left"
         else:
-            # 68-byte packet: 0x01=MAX Right, 0x02=Default
-            if balance == 0x01:
-                return "MAX Right"
-            elif balance == 0x02:
-                return "Default"
+            # For intermediate values, we need to map them to UI values
+            # The range appears to be 0x01 to 0x3d (1 to 61)
+            if 0x01 <= balance <= 0x3d:
+                # Map 0x01-0x3d to -100 to +100
+                ui_value = int((balance - 0x01) / (0x3d - 0x01) * 200) - 100
+                return str(ui_value)
             else:
                 return f"UNKNOWN(0x{balance:02x})"
     
@@ -190,6 +194,34 @@ class UniversalHNGSyncDecoder:
                 return "MUTED"
             else:
                 return f"UNKNOWN(0x{mute:02x})"
+
+    
+    def get_bass_start(self, hng_start: int, packet_size: int) -> int:
+        """Get the starting byte position for bass data"""
+        # Confirmed by differential analysis: bass is at position 26 + zone_index
+        return hng_start + 26
+    
+    def get_treble_start(self, hng_start: int, packet_size: int) -> int:
+        """Get the starting byte position for treble data"""
+        # Confirmed by differential analysis: treble is at position 18 + zone_index
+        return hng_start + 18
+    
+    def decode_bass_treble(self, zone: int, packet: bytes, hng_start: int, packet_size: int) -> tuple[int, int]:
+        """Decode bass and treble values from HNG sync packet"""
+        
+        bass_start = self.get_bass_start(hng_start, packet_size)
+        treble_start = self.get_treble_start(hng_start, packet_size)
+        
+        bass_val = packet[bass_start + zone]
+        treble_val = packet[treble_start + zone]
+        
+        # Based on differential analysis:
+        # Bass: 0x0d is center (0), range appears to be 0x01 to 0x19 (1 to 25)
+        # Treble: 0x0d is center (0), range appears to be 0x01 to 0x19 (1 to 25)
+        bass = bass_val - 0x0d if 0x01 <= bass_val <= 0x19 else 0
+        treble = treble_val - 0x0d if 0x01 <= treble_val <= 0x19 else 0
+        
+        return bass, treble
 
 class MatrioController:
     """Complete controller for Dayton Audio multi-zone amplifiers using Matrio Control protocol"""
