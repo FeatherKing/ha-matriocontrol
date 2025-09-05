@@ -35,7 +35,7 @@ async def async_setup_entry(
 
 
 class MatrioControlZoneSwitch(MatrioControlEntity, SwitchEntity):
-    """Representation of a DAX88 zone power switch."""
+    """Representation of a Matrio zone power switch."""
 
     def __init__(
         self, 
@@ -71,7 +71,7 @@ class MatrioControlZoneSwitch(MatrioControlEntity, SwitchEntity):
 
 
 class MatrioControlMuteSwitch(MatrioControlEntity, SwitchEntity):
-    """Representation of a DAX88 zone mute switch."""
+    """Representation of a Matrio zone mute switch."""
 
     def __init__(
         self, 

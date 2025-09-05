@@ -39,7 +39,9 @@ class MatrioControlDataUpdateCoordinator(DataUpdateCoordinator):
         try:
             # Check if we need to connect
             if not self.controller.socket:
-                if not self.controller.connect():
+                # Run connection in executor to avoid blocking event loop
+                connected = await self.hass.async_add_executor_job(self.controller.connect)
+                if not connected:
                     return {
                         "connected": False,
                         "zones": {},
@@ -55,10 +57,10 @@ class MatrioControlDataUpdateCoordinator(DataUpdateCoordinator):
             
             try:
                 # Try to get device info (this will test connectivity)
-                device_info = self.controller.query_device_info()
+                device_info = await self.hass.async_add_executor_job(self.controller.query_device_info)
                 
                 # Get zone and input names
-                names = self.controller.query_all_names()
+                names = await self.hass.async_add_executor_job(self.controller.query_all_names)
                 
                 # Update the controller's input mappings with actual device names
                 if names:
@@ -71,8 +73,9 @@ class MatrioControlDataUpdateCoordinator(DataUpdateCoordinator):
             except (ConnectionError, RuntimeError, NotImplementedError) as e:
                 _LOGGER.warning("Failed to query device info: %s", e)
                 # If query fails, try to reconnect
-                self.controller.disconnect()
-                if not self.controller.connect():
+                await self.hass.async_add_executor_job(self.controller.disconnect)
+                connected = await self.hass.async_add_executor_job(self.controller.connect)
+                if not connected:
                     return {
                         "connected": False,
                         "zones": {},
@@ -82,7 +85,7 @@ class MatrioControlDataUpdateCoordinator(DataUpdateCoordinator):
                         "last_heartbeat": None,
                     }
                 # After reconnection, try heartbeat check instead
-                heartbeat_received = self.controller.check_heartbeat()
+                heartbeat_received = await self.hass.async_add_executor_job(self.controller.check_heartbeat)
             
             return {
                 "connected": True,

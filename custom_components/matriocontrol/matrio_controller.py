@@ -144,6 +144,8 @@ class MatrioController:
             response1 = sock1.recv(1024)
             sock1.close()
             
+            # Small delay between subscriptions
+            import time
             time.sleep(0.5)
             
             # Subscribe to rendercontrol1 events

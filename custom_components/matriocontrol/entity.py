@@ -21,7 +21,7 @@ class MatrioControlEntity(CoordinatorEntity[MatrioControlDataUpdateCoordinator])
         self.zone_id = zone_id
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, coordinator.entry.entry_id)},
-            name=coordinator.entry.data["name"],
+            name=coordinator.entry.data.get("name", "Matrio Control"),
             manufacturer=DEVICE_MANUFACTURER,
             model=DEVICE_MODEL,
         )
