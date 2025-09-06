@@ -49,8 +49,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             controller = MatrioController(
                 user_input[CONF_HOST], user_input[CONF_PORT]
             )
-            await self.hass.async_add_executor_job(controller.connect)
-            await self.hass.async_add_executor_job(controller.disconnect)
+            await controller.connect()
+            await controller.disconnect()
         except Exception as ex:
             _LOGGER.error("Failed to connect to Matrio device: %s", ex)
             errors["base"] = "cannot_connect"

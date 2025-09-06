@@ -21,7 +21,8 @@ import socket
 import time
 import struct
 import logging
-from typing import Dict, List, Any
+import asyncio
+from typing import Dict, List, Any, Optional, Callable
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -231,6 +232,215 @@ class UniversalHNGSyncDecoder:
         
         return bass, treble
 
+class BroadcastDecoder:
+    """Decodes broadcast packets from Matrio device"""
+    
+    def __init__(self, input_mappings: Dict[int, str]):
+        self.input_mappings = input_mappings
+        
+    def decode_packet(self, packet_hex: str) -> Optional[Dict[str, Any]]:
+        """Decode any packet - either broadcast or command echo"""
+        try:
+            packet = bytes.fromhex(packet_hex)
+            _LOGGER.debug(f"BroadcastDecoder: Attempting to decode packet ({len(packet)} bytes): {packet_hex[:50]}...")
+            
+            # Check if this is a command echo packet (starts with 18961820)
+            if len(packet) >= 4 and packet[:4] == b'\x18\x96\x18\x20':
+                _LOGGER.debug("BroadcastDecoder: Detected command echo packet")
+                return self._decode_command_echo_packet(packet)
+            
+            # Check if this is a direct broadcast packet (starts with 82)
+            elif len(packet) >= 3 and packet[0] == 0x82:
+                _LOGGER.debug("BroadcastDecoder: Detected direct broadcast packet")
+                return self._decode_direct_broadcast_packet(packet)
+            
+            _LOGGER.debug("BroadcastDecoder: Packet not recognized as broadcast or command echo")
+            return None
+                
+        except Exception as e:
+            _LOGGER.error(f"BroadcastDecoder: Failed to decode packet: {e}")
+            return None
+    
+    def _decode_command_echo_packet(self, packet: bytes) -> Optional[Dict[str, Any]]:
+        """Decode command echo packet to extract the actual command"""
+        try:
+            _LOGGER.debug(f"BroadcastDecoder: Decoding command echo packet ({len(packet)} bytes)")
+            
+            # Extract payload (skip header + length + data = 20 bytes)
+            if len(packet) < 20:
+                _LOGGER.debug("BroadcastDecoder: Command echo packet too short")
+                return None
+                
+            payload = packet[20:]
+            _LOGGER.debug(f"BroadcastDecoder: Extracted payload ({len(payload)} bytes): {payload.hex()[:50]}...")
+            
+            # Look for MCU+PAS+ (4d43552b5041532b) + command
+            if len(payload) < 10 or payload[:8] != b'MCU+PAS+':
+                _LOGGER.debug("BroadcastDecoder: Payload does not contain MCU+PAS+ signature")
+                return None
+                
+            # Extract command part (skip MCU+PAS+)
+            command_part = payload[8:]
+            _LOGGER.debug(f"BroadcastDecoder: Command part ({len(command_part)} bytes): {command_part.hex()}")
+            
+            if len(command_part) < 2:
+                _LOGGER.debug("BroadcastDecoder: Command part too short")
+                return None
+                
+            command = command_part[1]  # Skip 0x82, get command
+            _LOGGER.debug(f"BroadcastDecoder: Extracted command: 0x{command:02x}")
+            
+            # Extract the actual broadcast data (skip 0x82 + command)
+            if len(command_part) < 10:
+                _LOGGER.debug("BroadcastDecoder: Command part too short for broadcast data")
+                return None
+                
+            broadcast_data = command_part[2:10]  # 8 bytes: value + zone pattern
+            _LOGGER.debug(f"BroadcastDecoder: Broadcast data: {broadcast_data.hex()}")
+            
+            # Decode based on command type
+            result = self._decode_command_data(command, broadcast_data)
+            _LOGGER.debug(f"BroadcastDecoder: Command data decode result: {result}")
+            return result
+            
+        except Exception as e:
+            _LOGGER.error(f"BroadcastDecoder: Failed to decode command echo packet: {e}")
+            return None
+    
+    def _decode_direct_broadcast_packet(self, packet: bytes) -> Optional[Dict[str, Any]]:
+        """Decode direct broadcast packet"""
+        if len(packet) < 11:
+            return None
+            
+        command = packet[1]
+        broadcast_data = packet[2:10]  # 8 bytes: value + zone pattern
+        
+        return self._decode_command_data(command, broadcast_data)
+    
+    def _decode_command_data(self, command: int, data: bytes) -> Optional[Dict[str, Any]]:
+        """Decode command data based on command type"""
+        if len(data) < 8:
+            _LOGGER.debug("BroadcastDecoder: Command data too short")
+            return None
+            
+        # Extract value (first byte) and zone pattern (remaining 7 bytes)
+        value = data[0]
+        zone_pattern = data[1:8]  # 7 bytes for zones 1-7 (0-based indexing)
+        
+        _LOGGER.debug(f"BroadcastDecoder: Command 0x{command:02x}, value 0x{value:02x}, zone_pattern {zone_pattern.hex()}")
+        
+        # Find which zones are affected (0-based indexing)
+        affected_zones = []
+        for i, zone_val in enumerate(zone_pattern):
+            if zone_val == 0x01:
+                affected_zones.append(i + 1)  # Convert to 1-based for display
+        
+        _LOGGER.debug(f"BroadcastDecoder: Affected zones: {affected_zones}")
+        
+        # Decode based on command type
+        if command == 0x08:  # Power command
+            power_on = value == 0x02  # 0x02 = ON, 0x01 = OFF
+            _LOGGER.debug(f"BroadcastDecoder: Power command - zones {affected_zones} -> {'ON' if power_on else 'OFF'}")
+            return {
+                "type": "power",
+                "zones": affected_zones,
+                "power_on": power_on,
+                "raw_command": f"0x{command:02x}",
+                "raw_data": data.hex()
+            }
+            
+        elif command == 0x01:  # Volume command
+            volume = max(0, value - 1)  # Convert from device value to UI value
+            _LOGGER.debug(f"BroadcastDecoder: Volume command - zones {affected_zones} -> {volume}")
+            return {
+                "type": "volume",
+                "zones": affected_zones,
+                "volume": volume,
+                "raw_command": f"0x{command:02x}",
+                "raw_data": data.hex()
+            }
+            
+        elif command == 0x0e:  # Mute command
+            is_muted = value == 0x02
+            _LOGGER.debug(f"BroadcastDecoder: Mute command - zones {affected_zones} -> {'MUTED' if is_muted else 'UNMUTED'}")
+            return {
+                "type": "mute",
+                "zones": affected_zones,
+                "muted": is_muted,
+                "raw_command": f"0x{command:02x}",
+                "raw_data": data.hex()
+            }
+            
+        elif command == 0x0d:  # Input selection command
+            input_id = value
+            input_name = self.input_mappings.get(input_id, f"Input {input_id}")
+            _LOGGER.debug(f"BroadcastDecoder: Input command - zones {affected_zones} -> {input_name} (ID: {input_id})")
+            return {
+                "type": "input",
+                "zones": affected_zones,
+                "input_id": input_id,
+                "input_name": input_name,
+                "raw_command": f"0x{command:02x}",
+                "raw_data": data.hex()
+            }
+            
+        elif command == 0x05:  # Balance command
+            balance = self._decode_balance_value(value)
+            return {
+                "type": "balance",
+                "zones": affected_zones,
+                "balance": balance,
+                "raw_command": f"0x{command:02x}",
+                "raw_data": data.hex()
+            }
+            
+        elif command == 0x03:  # Bass command
+            bass = value - 0x0d if 0x01 <= value <= 0x19 else 0
+            return {
+                "type": "bass",
+                "zones": affected_zones,
+                "bass": bass,
+                "raw_command": f"0x{command:02x}",
+                "raw_data": data.hex()
+            }
+            
+        elif command == 0x02:  # Treble command
+            treble = value - 0x0d if 0x01 <= value <= 0x19 else 0
+            return {
+                "type": "treble",
+                "zones": affected_zones,
+                "treble": treble,
+                "raw_command": f"0x{command:02x}",
+                "raw_data": data.hex()
+            }
+            
+        elif command == 0x10:  # Total volume command
+            volume = max(0, value - 1)
+            return {
+                "type": "total_volume",
+                "zones": affected_zones,
+                "volume": volume,
+                "raw_command": f"0x{command:02x}",
+                "raw_data": data.hex()
+            }
+        
+        return None
+    
+    def _decode_balance_value(self, value: int) -> int:
+        """Decode balance value from device format to UI format"""
+        if value == 0x3d:
+            return 100  # Max right
+        elif value == 0x1f:
+            return 0    # Center
+        elif value == 0x01:
+            return -100 # Max left
+        else:
+            # Linear interpolation
+            if 0x01 <= value <= 0x3d:
+                return int((value - 0x01) / (0x3d - 0x01) * 200) - 100
+            else:
+                return 0
+
 class MatrioController:
     """Complete controller for Dayton Audio multi-zone amplifiers using Matrio Control protocol"""
     
@@ -244,20 +454,27 @@ class MatrioController:
         """
         self.ip = ip
         self.port = port
-        self.socket = None
+        self.reader = None
+        self.writer = None
         self.zones = {}
+        self.zone_names = {}
         self.hng_decoder = UniversalHNGSyncDecoder()
+        self.broadcast_decoder = None
+        self.state_callback = None
+        self.connected = False
+        self._reader_task = None
+        self._writer_task = None
         
         # Default input mapping based on capture analysis
         self.inputs = {
-            1: "TV",
-            2: "Google Music", 
+            1: "Input1",
+            2: "Input2", 
             3: "Input3",
             4: "Input4",
             5: "Input5",
             6: "Input6",
             7: "Input7",
-            8: "Wi-Fi"
+            8: "Input8"
         }
     
     def _get_local_ip(self) -> str:
@@ -283,51 +500,434 @@ class MatrioController:
                 # Last resort: return localhost
                 return "127.0.0.1"
         
-    def connect(self) -> bool:
-        """Connect to Matrio-compatible device"""
+    async def connect(self, state_callback: Optional[Callable] = None) -> bool:
+        """Connect to Matrio-compatible device and start reader/writer tasks"""
         try:
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.settimeout(10)
-            self.socket.connect((self.ip, self.port))
-            print(f"Connected to Matrio device at {self.ip}:{self.port}")
+            _LOGGER.debug(f"Attempting to connect to Matrio device at {self.ip}:{self.port}")
+            
+            # Create connection
+            self.reader, self.writer = await asyncio.open_connection(self.ip, self.port)
+            _LOGGER.info(f"TCP connection established to {self.ip}:{self.port}")
+            _LOGGER.debug(f"Reader: {self.reader}, Writer: {self.writer}")
+            
+            # Store state callback
+            self.state_callback = state_callback
+            _LOGGER.debug(f"State callback set: {state_callback is not None}")
             
             # Initialize the device with the required protocol sequence
-            if self._initialize_device():
-                print("Device initialized successfully")
+            _LOGGER.debug("Starting device initialization sequence...")
+            if await self._initialize_device():
+                _LOGGER.info("Device initialization completed successfully")
+                
+                # Initialize broadcast decoder
+                self.broadcast_decoder = BroadcastDecoder(self.inputs)
+                _LOGGER.debug("Broadcast decoder initialized with input mappings: %s", self.inputs)
+                
+                # Start reader and writer tasks
+                _LOGGER.debug("Starting reader and writer tasks...")
+                self._reader_task = asyncio.create_task(self._reader_loop())
+                self._writer_task = asyncio.create_task(self._writer_loop())
+                _LOGGER.debug("Reader task: %s, Writer task: %s", self._reader_task, self._writer_task)
+                
+                self.connected = True
+                _LOGGER.info("Matrio controller fully connected and ready")
                 return True
             else:
-                print("Device initialization failed")
-                self.disconnect()
+                _LOGGER.error("Device initialization failed")
+                await self.disconnect()
                 return False
         except Exception as e:
-            print(f"Connection failed: {e}")
+            _LOGGER.error(f"Connection failed: {e}")
             return False
     
-    def _initialize_device(self) -> bool:
+    async def _initialize_device(self) -> bool:
         """
         Initialize the device with the required UPnP and binary protocol sequence
         This is required before the device will accept control commands
         """
         try:
+            _LOGGER.debug("Step 1: Setting up UPnP event subscriptions...")
             # Step 1: UPnP Event Subscriptions
-            if not self._setup_upnp_subscriptions():
+            if not await self._setup_upnp_subscriptions():
+                _LOGGER.error("UPnP event subscriptions failed")
                 return False
+            _LOGGER.debug("UPnP event subscriptions completed successfully")
             
+            _LOGGER.debug("Step 2: Sending SOAP commands...")
             # Step 2: SOAP Commands
-            if not self._send_soap_commands():
+            if not await self._send_soap_commands():
+                _LOGGER.error("SOAP commands failed")
                 return False
+            _LOGGER.debug("SOAP commands completed successfully")
             
+            _LOGGER.debug("Step 3: Binary protocol initialization...")
             # Step 3: Binary Protocol Initialization
-            if not self._send_binary_initialization():
+            if not await self._send_binary_initialization():
+                _LOGGER.error("Binary protocol initialization failed")
                 return False
+            _LOGGER.debug("Binary protocol initialization completed successfully")
             
+            _LOGGER.info("All device initialization steps completed successfully")
             return True
             
         except Exception as e:
-            print(f"Device initialization failed: {e}")
+            _LOGGER.error(f"Device initialization failed: {e}")
             return False
     
-    def _setup_upnp_subscriptions(self) -> bool:
+    async def _reader_loop(self):
+        """Reader loop that handles incoming packets and broadcasts"""
+        try:
+            _LOGGER.debug("Reader loop started")
+            
+            # First, get initial state via HNG sync
+            _LOGGER.debug("Getting initial device state via HNG sync...")
+            await self._get_initial_state()
+            _LOGGER.debug("Initial state retrieval completed")
+            
+            # Then listen for broadcast packets
+            _LOGGER.info("Starting broadcast packet listener...")
+            packet_count = 0
+            while self.connected:
+                try:
+                    # Read data with timeout
+                    data = await asyncio.wait_for(self.reader.read(1024), timeout=1.0)
+                    
+                    if len(data) == 0:
+                        _LOGGER.warning("Connection lost - received empty data")
+                        break
+                    
+                    packet_count += 1
+                    # Decode the packet
+                    packet_hex = data.hex()
+                    _LOGGER.debug(f"Received packet #{packet_count} ({len(data)} bytes): {packet_hex}")
+                    
+                    # Try to decode as broadcast packet
+                    if self.broadcast_decoder:
+                        _LOGGER.debug("Attempting to decode packet as broadcast...")
+                        broadcast_info = self.broadcast_decoder.decode_packet(packet_hex)
+                        
+                        if broadcast_info:
+                            _LOGGER.debug(f"Successfully decoded broadcast: {broadcast_info}")
+                            await self._handle_broadcast(broadcast_info)
+                        else:
+                            _LOGGER.debug("Packet is not a recognized broadcast packet")
+                    else:
+                        _LOGGER.warning("Broadcast decoder not initialized")
+                            
+                except asyncio.TimeoutError:
+                    # Timeout is expected, continue listening
+                    continue
+                except Exception as e:
+                    if self.connected:
+                        _LOGGER.error(f"Error in reader loop: {e}")
+                    break
+                    
+        except Exception as e:
+            _LOGGER.error(f"Reader loop failed: {e}")
+        finally:
+            _LOGGER.debug("Reader loop ending, setting connected=False")
+            self.connected = False
+    
+    async def _writer_loop(self):
+        """Writer loop that handles outgoing commands"""
+        try:
+            while self.connected:
+                # This loop can be used for queued commands if needed
+                await asyncio.sleep(0.1)
+        except Exception as e:
+            _LOGGER.error(f"Writer loop failed: {e}")
+        finally:
+            self.connected = False
+    
+    async def _get_initial_state(self):
+        """Get initial device state via HNG sync"""
+        try:
+            _LOGGER.debug("Starting initial state retrieval via HNG sync...")
+            
+            # Send initialization command
+            init_packet = bytes.fromhex("189618200f0000005706000000000000000000004d43552b5041532b820affffff8926")
+            _LOGGER.debug(f"Sending initialization packet: {init_packet.hex()}")
+            self.writer.write(init_packet)
+            await self.writer.drain()
+            _LOGGER.debug("Initialization packet sent successfully")
+            
+            # Wait for responses (device might send both HNG sync and ALLNAMES together)
+            _LOGGER.debug("Waiting for device responses...")
+            response = await asyncio.wait_for(self.reader.read(2048), timeout=10.0)
+            if len(response) == 0:
+                _LOGGER.warning("No response received from device")
+                return
+            
+            _LOGGER.debug("Received response: %d bytes - %s", len(response), response.hex()[:200])
+            
+            # The device might send both HNG sync and ALLNAMES in one packet
+            # or in separate packets. Let's try to parse what we got.
+            sync_response = response
+            allnames_response = b""
+            
+            # Check if this looks like a combined response
+            if len(response) > 200:  # Likely contains both responses
+                _LOGGER.debug("Detected combined response, attempting to split...")
+                # Try to find the boundary between HNG sync and ALLNAMES
+                # Look for the ALLNAMES command pattern (0x8215)
+                allnames_start = response.find(b'\x82\x15')
+                if allnames_start > 0:
+                    sync_response = response[:allnames_start]
+                    allnames_response = response[allnames_start:]
+                    _LOGGER.debug("Split response: sync=%d bytes, allnames=%d bytes", 
+                                len(sync_response), len(allnames_response))
+                else:
+                    _LOGGER.debug("Could not find ALLNAMES boundary, using full response as sync")
+            else:
+                # Single response, try to get ALLNAMES separately
+                _LOGGER.debug("Single response received, waiting for ALLNAMES...")
+                try:
+                    allnames_response = await asyncio.wait_for(self.reader.read(1024), timeout=5.0)
+                    if len(allnames_response) > 0:
+                        _LOGGER.debug("Received separate ALLNAMES response: %d bytes", len(allnames_response))
+                    else:
+                        _LOGGER.debug("No separate ALLNAMES response received")
+                except asyncio.TimeoutError:
+                    _LOGGER.debug("Timeout waiting for ALLNAMES response")
+                    allnames_response = b""
+            
+            # Parse ALLNAMES response to get device names
+            if len(allnames_response) > 0:
+                try:
+                    # Parse the ALLNAMES response directly
+                    allnames_data = self._parse_allnames_response(allnames_response)
+                    _LOGGER.info("Parsed ALLNAMES data: %s", allnames_data)
+                    
+                    # Update input mappings with actual device names
+                    for i in range(1, 9):
+                        input_key = f"input_{i}"
+                        if input_key in allnames_data:
+                            self.inputs[i] = allnames_data[input_key]
+                            _LOGGER.debug("Updated input %d: %s", i, allnames_data[input_key])
+                    
+                    # Store zone names
+                    self.zone_names = {}
+                    for i in range(8):
+                        zone_key = f"zone_{i}"
+                        if zone_key in allnames_data:
+                            self.zone_names[i+1] = allnames_data[zone_key]
+                            _LOGGER.debug("Updated zone %d: %s", i+1, allnames_data[zone_key])
+                            
+                except Exception as e:
+                    _LOGGER.warning("Failed to parse ALLNAMES response: %s", e)
+            else:
+                _LOGGER.warning("No ALLNAMES response received, using default names")
+                # Set default names if ALLNAMES parsing failed
+                self.zone_names = {i: f"Zone {i}" for i in range(1, 9)}
+            
+            # Look for HNG sync packet in the responses
+            combined_data = sync_response + allnames_response
+            _LOGGER.debug("Combined data: %d bytes total", len(combined_data))
+            
+            # Check if this is a concatenated packet (multiple HNG sync packets)
+            if len(combined_data) > 100:  # Likely concatenated packets
+                _LOGGER.debug("Detected concatenated packets, extracting HNG sync...")
+                hng_hex = self._extract_hng_sync_packet(combined_data)
+                if not hng_hex:
+                    _LOGGER.warning("Could not extract HNG sync packet from concatenated data")
+                    return
+                _LOGGER.debug("Extracted HNG sync packet: %d bytes", len(bytes.fromhex(hng_hex)))
+            else:
+                hng_hex = combined_data.hex()
+                _LOGGER.debug("Using combined data directly as HNG sync packet")
+            
+            # Decode the packet
+            _LOGGER.debug("Decoding HNG sync packet with input mappings: %s", self.inputs)
+            result = self.hng_decoder.decode_hng_sync_packet(hng_hex, self.inputs)
+            
+            if result and 'zones' in result:
+                self.zones = result['zones']
+                _LOGGER.info("Initial state received: %d zones", len(self.zones))
+                _LOGGER.debug("Zone details: %s", {k: v for k, v in self.zones.items()})
+                
+                # Notify callback of initial state
+                if self.state_callback:
+                    _LOGGER.debug("Calling state callback with initial state...")
+                    self.state_callback(self.zones)
+                    _LOGGER.debug("State callback completed")
+                else:
+                    _LOGGER.debug("No state callback set")
+            else:
+                _LOGGER.warning("Could not decode initial state - result: %s", result)
+                
+        except Exception as e:
+            _LOGGER.error(f"Failed to get initial state: {e}")
+    
+    def _parse_allnames_response(self, response: bytes) -> Dict[str, str]:
+        """Parse ALLNAMES response to extract zone and input names"""
+        try:
+            # The ALLNAMES packet structure from packet capture:
+            # Header: 18961820a3000000823400000000000000000000
+            # Payload: 4d43552b5041532b82150b4441582038385f363136450b4c6976696e6720526f6f6d0e4d617374657220426564726f6f6d0d4465636b2055707374616972730f4465636b20446f776e7374616972730a446f776e737461697273065a4f4e453636055a4f4e4537055a4f4e45380254560c476f6f676c65204d7573696306496e7075743306496e7075743406496e7075743507496e707574363606496e70757437cc26
+            
+            # Skip the protocol header and get to the actual data
+            # The payload starts after the protocol header (20 bytes)
+            payload_start = 20
+            if len(response) < payload_start:
+                raise RuntimeError("Response too short to contain ALLNAMES data")
+            
+            # Extract the payload (skip protocol header)
+            payload = response[payload_start:]
+            
+            # The payload structure:
+            # MCU+PAS+ (8 bytes) + 8215 (2 bytes) + length (1 byte) + device_name + zone_names + input_names
+            
+            # Skip MCU+PAS+ and command (10 bytes)
+            data_start = 10
+            if len(payload) < data_start:
+                raise RuntimeError("Payload too short")
+            
+            data = payload[data_start:]
+            
+            # Parse length-prefixed strings
+            names = {}
+            pos = 0
+            
+            # First string is device name (length 0x0b = 11 bytes)
+            if pos + 1 > len(data):
+                raise RuntimeError("No device name length found")
+            
+            device_name_len = data[pos]
+            pos += 1
+            
+            if pos + device_name_len > len(data):
+                raise RuntimeError("Device name extends beyond data")
+            
+            device_name = data[pos:pos + device_name_len].decode('ascii', errors='ignore')
+            pos += device_name_len
+            
+            # Parse zone names (8 zones)
+            zone_names = []
+            for zone_id in range(8):
+                if pos >= len(data):
+                    break
+                
+                name_len = data[pos]
+                pos += 1
+                
+                if pos + name_len > len(data):
+                    break
+                
+                zone_name = data[pos:pos + name_len].decode('ascii', errors='ignore')
+                zone_names.append(zone_name)
+                pos += name_len
+            
+            # Parse input names (8 inputs)
+            input_names = []
+            for input_id in range(8):
+                if pos >= len(data):
+                    # If we've reached the end of data, Input 8 is typically "Wi-Fi"
+                    if input_id == 7:  # Input 8 (index 7)
+                        input_names.append("Wi-Fi")
+                    break
+                
+                name_len = data[pos]
+                pos += 1
+                
+                if pos + name_len > len(data):
+                    # If we can't read the full name, Input 8 is typically "Wi-Fi"
+                    if input_id == 7:  # Input 8 (index 7)
+                        input_names.append("Wi-Fi")
+                    break
+                
+                input_name = data[pos:pos + name_len].decode('ascii', errors='ignore')
+                input_names.append(input_name)
+                pos += name_len
+            
+            # Ensure we have exactly 8 input names (pad with "Wi-Fi" for Input 8 if missing)
+            while len(input_names) < 8:
+                if len(input_names) == 7:  # Input 8 (index 7)
+                    input_names.append("Wi-Fi")
+                else:
+                    input_names.append(f"Input{len(input_names) + 1}")
+            
+            # Build the names dictionary
+            for i, zone_name in enumerate(zone_names):
+                names[f"zone_{i}"] = zone_name
+            
+            for i, input_name in enumerate(input_names):
+                names[f"input_{i+1}"] = input_name
+            
+            return names
+            
+        except Exception as e:
+            raise RuntimeError(f"Failed to parse zone/input names from response: {e}")
+    
+    async def _handle_broadcast(self, broadcast_info: Dict[str, Any]):
+        """Handle broadcast packet and update state"""
+        try:
+            change_type = broadcast_info['type']
+            zones = broadcast_info.get('zones', [])
+            raw_command = broadcast_info.get('raw_command', 'unknown')
+            raw_data = broadcast_info.get('raw_data', 'unknown')
+            
+            _LOGGER.debug(f"Handling broadcast: type={change_type}, zones={zones}, command={raw_command}, data={raw_data}")
+            
+            if not zones:
+                _LOGGER.debug(f"{change_type.upper()}: No zones affected")
+                return
+            
+            _LOGGER.info(f"Broadcast received: {change_type.upper()} for zones {zones}")
+            
+            # Update zone states based on broadcast
+            for zone_id in zones:
+                if zone_id not in self.zones:
+                    _LOGGER.debug(f"Creating new zone entry for zone {zone_id}")
+                    self.zones[zone_id] = {}
+                
+                old_value = None
+                if change_type == "power":
+                    old_value = self.zones[zone_id].get('power')
+                    self.zones[zone_id]['power'] = "ON" if broadcast_info['power_on'] else "OFF"
+                    _LOGGER.debug(f"Zone {zone_id} power: {old_value} -> {self.zones[zone_id]['power']}")
+                elif change_type == "volume":
+                    old_value = self.zones[zone_id].get('volume')
+                    self.zones[zone_id]['volume'] = broadcast_info['volume']
+                    _LOGGER.debug(f"Zone {zone_id} volume: {old_value} -> {self.zones[zone_id]['volume']}")
+                elif change_type == "mute":
+                    old_value = self.zones[zone_id].get('mute')
+                    self.zones[zone_id]['mute'] = "MUTED" if broadcast_info['muted'] else "DEFAULT"
+                    _LOGGER.debug(f"Zone {zone_id} mute: {old_value} -> {self.zones[zone_id]['mute']}")
+                elif change_type == "input":
+                    old_value = self.zones[zone_id].get('input')
+                    self.zones[zone_id]['input'] = broadcast_info['input_name']
+                    _LOGGER.debug(f"Zone {zone_id} input: {old_value} -> {self.zones[zone_id]['input']}")
+                elif change_type == "balance":
+                    old_value = self.zones[zone_id].get('balance')
+                    self.zones[zone_id]['balance'] = str(broadcast_info['balance'])
+                    _LOGGER.debug(f"Zone {zone_id} balance: {old_value} -> {self.zones[zone_id]['balance']}")
+                elif change_type == "bass":
+                    old_value = self.zones[zone_id].get('bass')
+                    self.zones[zone_id]['bass'] = broadcast_info['bass']
+                    _LOGGER.debug(f"Zone {zone_id} bass: {old_value} -> {self.zones[zone_id]['bass']}")
+                elif change_type == "treble":
+                    old_value = self.zones[zone_id].get('treble')
+                    self.zones[zone_id]['treble'] = broadcast_info['treble']
+                    _LOGGER.debug(f"Zone {zone_id} treble: {old_value} -> {self.zones[zone_id]['treble']}")
+                elif change_type == "total_volume":
+                    old_value = self.zones[zone_id].get('volume')
+                    self.zones[zone_id]['volume'] = broadcast_info['volume']
+                    _LOGGER.debug(f"Zone {zone_id} total volume: {old_value} -> {self.zones[zone_id]['volume']}")
+            
+            _LOGGER.debug(f"State updated for zones {zones} - {change_type}")
+            
+            # Notify callback of state change
+            if self.state_callback:
+                _LOGGER.debug("Calling state callback with updated state...")
+                self.state_callback(self.zones)
+                _LOGGER.debug("State callback completed")
+            else:
+                _LOGGER.debug("No state callback set, skipping notification")
+                
+        except Exception as e:
+            _LOGGER.error(f"Failed to handle broadcast: {e}")
+    
+    async def _setup_upnp_subscriptions(self) -> bool:
         """Setup UPnP event subscriptions on port 59152"""
         try:
             upnp_port = 59152
@@ -347,16 +947,16 @@ class MatrioController:
                 "\r\n"
             )
             
-            sock1 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock1.settimeout(10)
-            sock1.connect((self.ip, upnp_port))
-            sock1.send(subscribe_request1.encode())
-            response1 = sock1.recv(1024)
-            sock1.close()
+            reader1, writer1 = await asyncio.open_connection(self.ip, upnp_port)
+            writer1.write(subscribe_request1.encode())
+            await writer1.drain()
+            response1 = await reader1.read(1024)
+            writer1.close()
+            await writer1.wait_closed()
             
             # Small delay between subscriptions
             import time
-            time.sleep(0.5)
+            await asyncio.sleep(0.5)
             
             # Subscribe to rendercontrol1 events
             subscribe_request2 = (
@@ -372,14 +972,14 @@ class MatrioController:
                 "\r\n"
             )
             
-            sock2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock2.settimeout(10)
-            sock2.connect((self.ip, upnp_port))
-            sock2.send(subscribe_request2.encode())
-            response2 = sock2.recv(1024)
-            sock2.close()
+            reader2, writer2 = await asyncio.open_connection(self.ip, upnp_port)
+            writer2.write(subscribe_request2.encode())
+            await writer2.drain()
+            response2 = await reader2.read(1024)
+            writer2.close()
+            await writer2.wait_closed()
             
-            time.sleep(0.5)
+            await asyncio.sleep(0.5)
             
             # Subscribe to PlayQueue1 events
             subscribe_request3 = (
@@ -395,12 +995,12 @@ class MatrioController:
                 "\r\n"
             )
             
-            sock3 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock3.settimeout(10)
-            sock3.connect((self.ip, upnp_port))
-            sock3.send(subscribe_request3.encode())
-            response3 = sock3.recv(1024)
-            sock3.close()
+            reader3, writer3 = await asyncio.open_connection(self.ip, upnp_port)
+            writer3.write(subscribe_request3.encode())
+            await writer3.drain()
+            response3 = await reader3.read(1024)
+            writer3.close()
+            await writer3.wait_closed()
             
             return True
             
@@ -408,7 +1008,7 @@ class MatrioController:
             print(f"UPnP subscription failed: {e}")
             return False
     
-    def _send_soap_commands(self) -> bool:
+    async def _send_soap_commands(self) -> bool:
         """Send required SOAP commands on port 59152"""
         try:
             upnp_port = 59152
@@ -424,14 +1024,14 @@ class MatrioController:
                 "<?xml version=\"1.0\" encoding=\"utf-8\"?><s:Envelope s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\" xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body><u:GetControlDeviceInfo xmlns:u=\"urn:schemas-upnp-org:service:RenderingControl:1\"><InstanceID>0</InstanceID></u:GetControlDeviceInfo></s:Body></s:Envelope>"
             )
             
-            sock4 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock4.settimeout(10)
-            sock4.connect((self.ip, upnp_port))
-            sock4.send(soap_request1.encode())
-            response4 = sock4.recv(1024)
-            sock4.close()
+            reader4, writer4 = await asyncio.open_connection(self.ip, upnp_port)
+            writer4.write(soap_request1.encode())
+            await writer4.drain()
+            response4 = await reader4.read(1024)
+            writer4.close()
+            await writer4.wait_closed()
             
-            time.sleep(0.5)
+            await asyncio.sleep(0.5)
             
             # GetInfoEx
             soap_request2 = (
@@ -444,14 +1044,14 @@ class MatrioController:
                 "<?xml version=\"1.0\" encoding=\"utf-8\"?><s:Envelope s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\" xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body><u:GetInfoEx xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\"><InstanceID>0</InstanceID></u:GetInfoEx></s:Body></s:Envelope>"
             )
             
-            sock5 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock5.settimeout(10)
-            sock5.connect((self.ip, upnp_port))
-            sock5.send(soap_request2.encode())
-            response5 = sock5.recv(1024)
-            sock5.close()
+            reader5, writer5 = await asyncio.open_connection(self.ip, upnp_port)
+            writer5.write(soap_request2.encode())
+            await writer5.drain()
+            response5 = await reader5.read(1024)
+            writer5.close()
+            await writer5.wait_closed()
             
-            time.sleep(0.5)
+            await asyncio.sleep(0.5)
             
             # GetChannel
             soap_request3 = (
@@ -464,12 +1064,12 @@ class MatrioController:
                 "<?xml version=\"1.0\" encoding=\"utf-8\"?><s:Envelope s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\" xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body><u:GetChannel xmlns:u=\"urn:schemas-upnp-org:service:RenderingControl:1\"><InstanceID>0</InstanceID><Channel>Master</Channel></u:GetChannel></s:Body></s:Envelope>"
             )
             
-            sock6 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock6.settimeout(10)
-            sock6.connect((self.ip, upnp_port))
-            sock6.send(soap_request3.encode())
-            response6 = sock6.recv(1024)
-            sock6.close()
+            reader6, writer6 = await asyncio.open_connection(self.ip, upnp_port)
+            writer6.write(soap_request3.encode())
+            await writer6.drain()
+            response6 = await reader6.read(1024)
+            writer6.close()
+            await writer6.wait_closed()
             
             return True
             
@@ -477,39 +1077,67 @@ class MatrioController:
             print(f"SOAP commands failed: {e}")
             return False
     
-    def _send_binary_initialization(self) -> bool:
+    async def _send_binary_initialization(self) -> bool:
         """Send binary protocol initialization sequence"""
         try:
             # Send initialization command (0x0a)
             init_packet = bytes.fromhex("189618200f0000005706000000000000000000004d43552b5041532b820affffff8926")
-            self.socket.send(init_packet)
+            self.writer.write(init_packet)
+            await self.writer.drain()
             
             # Wait for HNG_SYNC_COMMAND response
-            self.socket.settimeout(5.0)
-            sync_response = self.socket.recv(1024)
+            sync_response = await asyncio.wait_for(self.reader.read(1024), timeout=5.0)
             if len(sync_response) == 0:
                 return False
             
             # Wait for ALLNAMES response
-            allnames_response = self.socket.recv(1024)
+            allnames_response = await asyncio.wait_for(self.reader.read(1024), timeout=5.0)
             if len(allnames_response) == 0:
                 return False
             
             return True
             
         except Exception as e:
-            print(f"Binary initialization failed: {e}")
+            _LOGGER.error(f"Binary initialization failed: {e}")
             return False
     
-    def disconnect(self):
+    async def disconnect(self):
         """Disconnect from device"""
-        if self.socket:
-            self.socket.close()
-            self.socket = None
-            print("Disconnected from Matrio device")
+        _LOGGER.debug("Starting disconnect process...")
+        self.connected = False
+        
+        # Cancel reader and writer tasks
+        if self._reader_task:
+            _LOGGER.debug("Cancelling reader task...")
+            self._reader_task.cancel()
+            try:
+                await self._reader_task
+            except asyncio.CancelledError:
+                _LOGGER.debug("Reader task cancelled successfully")
+                pass
+        
+        if self._writer_task:
+            _LOGGER.debug("Cancelling writer task...")
+            self._writer_task.cancel()
+            try:
+                await self._writer_task
+            except asyncio.CancelledError:
+                _LOGGER.debug("Writer task cancelled successfully")
+                pass
+        
+        # Close connection
+        if self.writer:
+            _LOGGER.debug("Closing writer connection...")
+            self.writer.close()
+            await self.writer.wait_closed()
+            _LOGGER.debug("Writer connection closed")
+        
+        self.reader = None
+        self.writer = None
+        _LOGGER.info("Disconnected from Matrio device")
     
     
-    def _send_input_command(self, zone_id: int, input_id: int) -> bool:
+    async def _send_input_command(self, zone_id: int, input_id: int) -> bool:
         """
         Send input command using the correct protocol discovered from capture analysis
         
@@ -519,8 +1147,8 @@ class MatrioController:
         """
         _LOGGER.debug("_send_input_command called: zone_id=%s, input_id=%s", zone_id, input_id)
         
-        if not self.socket:
-            _LOGGER.debug("No socket connection available")
+        if not self.writer:
+            _LOGGER.debug("No writer connection available")
             return False
         
         if zone_id < 1 or zone_id > 8:
@@ -551,12 +1179,12 @@ class MatrioController:
         _LOGGER.debug("Packet length: %s bytes", len(packet))
         
         try:
-            bytes_sent = self.socket.send(packet)
-            _LOGGER.debug("Sent %s bytes to device", bytes_sent)
+            self.writer.write(packet)
+            await self.writer.drain()
+            _LOGGER.debug("Sent packet to device")
             
             # Wait for response
-            self.socket.settimeout(2.0)
-            response = self.socket.recv(1024)
+            response = await asyncio.wait_for(self.reader.read(1024), timeout=2.0)
             
             if len(response) > 0:
                 _LOGGER.debug("Received response: %s...", response.hex()[:50])
@@ -568,7 +1196,7 @@ class MatrioController:
             _LOGGER.debug("Input command failed with exception: %s", e)
             return False
     
-    def _send_power_command(self, zone_id: int, power_on: bool) -> bool:
+    async def _send_power_command(self, zone_id: int, power_on: bool) -> bool:
         """
         Send power command using the correct protocol discovered from mobile app analysis
         
@@ -576,7 +1204,7 @@ class MatrioController:
             zone_id: Zone ID (1-8)
             power_on: True for power ON, False for power OFF
         """
-        if not self.socket:
+        if not self.writer:
             return False
         
         if zone_id < 1 or zone_id > 8:
@@ -606,11 +1234,11 @@ class MatrioController:
             packet_hex = f"18961820{length:02x}000000{command_code}000000000000000000004d43552b5041532b8208{pattern_hex}ffcc26"
             packet = bytes.fromhex(packet_hex)
             
-            self.socket.send(packet)
+            self.writer.write(packet)
+            await self.writer.drain()
             
             # Wait for response
-            self.socket.settimeout(2.0)
-            response = self.socket.recv(1024)
+            response = await asyncio.wait_for(self.reader.read(1024), timeout=2.0)
             
             if len(response) > 0:
                 print(f"Zone {zone_id} power {'ON' if power_on else 'OFF'} command sent successfully")
@@ -623,7 +1251,7 @@ class MatrioController:
             print(f"Power command failed: {e}")
             return False
     
-    def _send_volume_command(self, zone_id: int, volume: int) -> bool:
+    async def _send_volume_command(self, zone_id: int, volume: int) -> bool:
         """
         Send volume command using the correct zone-specific protocol from packet capture analysis
         
@@ -631,7 +1259,7 @@ class MatrioController:
             zone_id: Zone ID (1-8)
             volume: Volume level (0-38)
         """
-        if not self.socket:
+        if not self.writer:
             return False
         
         if zone_id < 1 or zone_id > 8:
@@ -663,11 +1291,11 @@ class MatrioController:
             packet_hex = f"1896182016000000{command_code}000000000000000000004d43552b5041532b8201{pattern}ffcc26"
             packet = bytes.fromhex(packet_hex)
             
-            self.socket.send(packet)
+            self.writer.write(packet)
+            await self.writer.drain()
             
             # Wait for response
-            self.socket.settimeout(2.0)
-            response = self.socket.recv(1024)
+            response = await asyncio.wait_for(self.reader.read(1024), timeout=2.0)
             
             if len(response) > 0:
                 print(f"Zone {zone_id} volume: {volume}")
@@ -680,7 +1308,7 @@ class MatrioController:
             print(f"Volume command failed: {e}")
             return False
     
-    def _send_mute_command(self, zone_id: int, mute: bool) -> bool:
+    async def _send_mute_command(self, zone_id: int, mute: bool) -> bool:
         """
         Send mute command using the correct zone-specific protocol from packet capture analysis
         
@@ -688,7 +1316,7 @@ class MatrioController:
             zone_id: Zone ID (1-8)
             mute: True for mute ON, False for mute OFF
         """
-        if not self.socket:
+        if not self.writer:
             return False
         
         if zone_id < 1 or zone_id > 8:
@@ -716,11 +1344,11 @@ class MatrioController:
             packet_hex = f"1896182016000000{command_code}000000000000000000004d43552b5041532b820e{pattern}ffcc26"
             packet = bytes.fromhex(packet_hex)
             
-            self.socket.send(packet)
+            self.writer.write(packet)
+            await self.writer.drain()
             
             # Wait for response
-            self.socket.settimeout(2.0)
-            response = self.socket.recv(1024)
+            response = await asyncio.wait_for(self.reader.read(1024), timeout=2.0)
             
             if len(response) > 0:
                 print(f"Zone {zone_id} mute: {'ON' if mute else 'OFF'}")
@@ -733,7 +1361,7 @@ class MatrioController:
             print(f"Mute command failed: {e}")
             return False
     
-    def _send_name_command(self, command_type: int, item_id: int, name: str) -> bool:
+    async def _send_name_command(self, command_type: int, item_id: int, name: str) -> bool:
         """
         Send zone or input name command
         
@@ -742,7 +1370,7 @@ class MatrioController:
             item_id: Zone or input ID (1-8)
             name: New name to set
         """
-        if not self.socket:
+        if not self.writer:
             return False
         
         # Convert name to bytes
@@ -753,9 +1381,10 @@ class MatrioController:
         packet = bytes([0x82, 0x13, command_type, item_id, name_length] + list(name_bytes) + [0xcc])
         
         try:
-            self.socket.send(packet)
+            self.writer.write(packet)
+            await self.writer.drain()
             # Wait for response
-            response = self.socket.recv(1024)
+            response = await asyncio.wait_for(self.reader.read(1024), timeout=2.0)
             return len(response) > 0
         except Exception as e:
             print(f"Name command failed: {e}")
@@ -763,32 +1392,32 @@ class MatrioController:
     
     
     # Zone and Input Naming
-    def set_zone_name(self, zone_id: int, name: str) -> bool:
+    async def set_zone_name(self, zone_id: int, name: str) -> bool:
         """Set zone name (zones 1-8)"""
         if zone_id < 1 or zone_id > 8:
             print(f"Invalid zone ID: {zone_id}. Must be 1-8")
             return False
-        result = self._send_name_command(0x01, zone_id, name)
+        result = await self._send_name_command(0x01, zone_id, name)
         if result:
             print(f"Zone {zone_id} renamed to: {name}")
         return result
     
-    def set_input_name(self, input_id: int, name: str) -> bool:
+    async def set_input_name(self, input_id: int, name: str) -> bool:
         """Set input name (inputs 1-8)"""
         if input_id < 1 or input_id > 8:
             print(f"Invalid input ID: {input_id}. Must be 1-8")
             return False
-        result = self._send_name_command(0x02, input_id, name)
+        result = await self._send_name_command(0x02, input_id, name)
         if result:
             print(f"Input {input_id} renamed to: {name}")
         return result
     
     # Individual Zone Controls
-    def set_zone_power(self, zone_id: int, power: bool) -> bool:
+    async def set_zone_power(self, zone_id: int, power: bool) -> bool:
         """Turn individual zone on/off using the correct protocol"""
-        return self._send_power_command(zone_id, power)
+        return await self._send_power_command(zone_id, power)
     
-    def set_volume(self, zone_id: int, volume: int) -> bool:
+    async def set_volume(self, zone_id: int, volume: int) -> bool:
         """Set volume for individual zone (0-38) using correct protocol"""
         if zone_id < 1 or zone_id > 8:
             print(f"Invalid zone ID: {zone_id}. Must be 1-8")
@@ -799,47 +1428,18 @@ class MatrioController:
             print(f"Invalid volume: {volume}. Must be 0-38")
             return False
         
-        return self._send_volume_command(zone_id, volume)
+        return await self._send_volume_command(zone_id, volume)
     
-    def set_mute(self, zone_id: int, mute: bool) -> bool:
+    async def set_mute(self, zone_id: int, mute: bool) -> bool:
         """Mute/unmute individual zone using correct protocol"""
         if zone_id < 1 or zone_id > 8:
             print(f"Invalid zone ID: {zone_id}. Must be 1-8")
             return False
         
-        return self._send_mute_command(zone_id, mute)
+        return await self._send_mute_command(zone_id, mute)
     
-    def set_balance(self, zone_id: int, balance: int) -> bool:
-        """Set balance for individual zone (-50 to +50, where 0 is center)"""
-        center = 44
-        device_balance = center + balance
-        device_balance = max(0, min(127, device_balance))
-        result = self._send_command(0x05, device_balance, selected_zones={zone_id})
-        if result:
-            print(f"Zone {zone_id} balance: {balance}")
-        return result
     
-    def set_bass(self, zone_id: int, bass: int) -> bool:
-        """Set bass for individual zone (-10 to +10)"""
-        center = 13
-        device_bass = center + bass
-        device_bass = max(0, min(127, device_bass))
-        result = self._send_command(0x03, device_bass, selected_zones={zone_id})
-        if result:
-            print(f"Zone {zone_id} bass: {bass}")
-        return result
-    
-    def set_treble(self, zone_id: int, treble: int) -> bool:
-        """Set treble for individual zone (-10 to +10)"""
-        center = 13
-        device_treble = center + treble
-        device_treble = max(0, min(127, device_treble))
-        result = self._send_command(0x02, device_treble, selected_zones={zone_id})
-        if result:
-            print(f"Zone {zone_id} treble: {treble}")
-        return result
-    
-    def set_input(self, zone_id: int, input_id: int) -> bool:
+    async def set_input(self, zone_id: int, input_id: int) -> bool:
         """Set input for individual zone (1-8)"""
         _LOGGER.debug("set_input called: zone_id=%s, input_id=%s", zone_id, input_id)
         
@@ -850,7 +1450,7 @@ class MatrioController:
         input_name = self.inputs.get(input_id, f"Input {input_id}")
         _LOGGER.debug("Attempting to set Zone %s to %s (ID: %s)", zone_id, input_name, input_id)
         
-        result = self._send_input_command(zone_id, input_id)
+        result = await self._send_input_command(zone_id, input_id)
         
         if result:
             _LOGGER.debug("SUCCESS: Zone %s input set to %s", zone_id, input_name)
@@ -874,13 +1474,13 @@ class MatrioController:
         # If we can't get device info, raise an exception
         raise RuntimeError("Could not retrieve device name from device")
     
-    def _send_protocol_command(self, command: int) -> bytes | None:
+    async def _send_protocol_command(self, command: int) -> bytes | None:
         """
         Send a protocol command using the Matrio Control protocol format
         Based on packet capture analysis of Matrio Control app
         Format: header (4 bytes) + length (4 bytes) + data (12 bytes) + payload
         """
-        if not self.socket:
+        if not self.writer:
             return None
         
         try:
@@ -906,7 +1506,8 @@ class MatrioController:
             header = bytes.fromhex("18961820")
             packet = header + length.to_bytes(4, 'little') + data + payload
             
-            self.socket.send(packet)
+            self.writer.write(packet)
+            await self.writer.drain()
             
             # For the sequence, we need to handle the protocol flow:
             # 1. Send 0x0a command
@@ -917,15 +1518,14 @@ class MatrioController:
             
             if command == 0x0a:
                 # Send first command and wait for responses
-                self.socket.settimeout(5.0)
                 
                 # Wait for ACK
-                ack = self.socket.recv(1024)
+                ack = await asyncio.wait_for(self.reader.read(1024), timeout=5.0)
                 if len(ack) == 0:
                     print("Received ACK")
                 
                 # Wait for 0x0c response (this is actually the ALLNAMES packet)
-                response = self.socket.recv(1024)
+                response = await asyncio.wait_for(self.reader.read(1024), timeout=5.0)
                 if len(response) > 0:
                     print(f"Received response: {len(response)} bytes")
                     # This is the ALLNAMES packet, return it directly
@@ -934,39 +1534,38 @@ class MatrioController:
                 return None
             else:
                 # For other commands, just send and receive
-                self.socket.settimeout(2.0)
-                response = self.socket.recv(1024)
+                response = await asyncio.wait_for(self.reader.read(1024), timeout=2.0)
                 return response if len(response) > 0 else None
                 
         except Exception as e:
             print(f"Protocol command failed: {e}")
             return None
     
-    def check_heartbeat(self) -> bool:
+    async def check_heartbeat(self) -> bool:
         """
         Check if the device is responding (heartbeat check)
         Returns True if device responds, False otherwise
         """
-        if not self.socket:
+        if not self.writer:
             return False
         
         try:
             # Try the first command to check if device is alive
-            response = self._send_protocol_command(0x0a)
+            response = await self._send_protocol_command(0x0a)
             return response is not None and len(response) > 0
         except Exception:
             return False
     
-    def query_device_info(self) -> Dict[str, str]:
+    async def query_device_info(self) -> Dict[str, str]:
         """
         Query device information from the Matrio-compatible device using the correct protocol
         Based on the logs, the device reports deviceInfo with MAC, firmware, etc.
         """
-        if not self.socket:
+        if not self.writer:
             raise ConnectionError("Not connected to device")
         
         # Send the first command (0x0a) to trigger the protocol sequence that returns ALLNAMES
-        response = self._send_protocol_command(0x0a)
+        response = await self._send_protocol_command(0x0a)
         if not response:
             raise RuntimeError("Device did not respond to ALLNAMES command")
         
@@ -1019,16 +1618,16 @@ class MatrioController:
         except Exception as e:
             raise RuntimeError(f"Failed to parse device info from response: {e}")
     
-    def query_all_names(self) -> Dict[str, str]:
+    async def query_all_names(self) -> Dict[str, str]:
         """
         Query all zone and input names from the device
         Based on the logs, the device sends ALLNAMES packets with zone and input names
         """
-        if not self.socket:
+        if not self.writer:
             raise ConnectionError("Not connected to device")
         
         # Send the first command (0x0a) to trigger the protocol sequence that returns ALLNAMES
-        response = self._send_protocol_command(0x0a)
+        response = await self._send_protocol_command(0x0a)
         if not response:
             raise RuntimeError("Device did not respond to ALLNAMES command")
         
@@ -1131,7 +1730,7 @@ class MatrioController:
         except Exception as e:
             raise RuntimeError(f"Failed to parse zone/input names from response: {e}")
     
-    def _send_audio_control_command(self, zone_id: int, control_type: str, value: int) -> bool:
+    async def _send_audio_control_command(self, zone_id: int, control_type: str, value: int) -> bool:
         """
         Send audio control command (balance, bass, treble) using the correct protocol
         
@@ -1145,7 +1744,7 @@ class MatrioController:
         Returns:
             bool: True if command sent successfully
         """
-        if not self.socket:
+        if not self.writer:
             print("Not connected to device")
             return False
         
@@ -1210,11 +1809,11 @@ class MatrioController:
         packet = bytes.fromhex(packet_hex)
         
         try:
-            self.socket.send(packet)
+            self.writer.write(packet)
+            await self.writer.drain()
             
             # Wait for response like other working commands
-            self.socket.settimeout(2.0)
-            response = self.socket.recv(1024)
+            response = await asyncio.wait_for(self.reader.read(1024), timeout=2.0)
             
             if len(response) > 0:
                 print(f"Sent {control_type} command for zone {zone_id}: value={value} (0x{hex_value:02x}) - Response: {response.hex()[:20]}...")
@@ -1250,7 +1849,7 @@ class MatrioController:
         # Ensure it's within bounds (should always be 0x01 to 0x19)
         return max(0x01, min(0x19, hex_value))
     
-    def set_balance(self, zone_id: int, balance: int) -> bool:
+    async def set_balance(self, zone_id: int, balance: int) -> bool:
         """
         Set balance for individual zone
         
@@ -1261,9 +1860,9 @@ class MatrioController:
         Returns:
             bool: True if command sent successfully
         """
-        return self._send_audio_control_command(zone_id, 'balance', balance)
+        return await self._send_audio_control_command(zone_id, 'balance', balance)
     
-    def set_bass(self, zone_id: int, bass: int) -> bool:
+    async def set_bass(self, zone_id: int, bass: int) -> bool:
         """
         Set bass level for individual zone
         
@@ -1274,9 +1873,9 @@ class MatrioController:
         Returns:
             bool: True if command sent successfully
         """
-        return self._send_audio_control_command(zone_id, 'bass', bass)
+        return await self._send_audio_control_command(zone_id, 'bass', bass)
     
-    def set_treble(self, zone_id: int, treble: int) -> bool:
+    async def set_treble(self, zone_id: int, treble: int) -> bool:
         """
         Set treble level for individual zone
         
@@ -1287,16 +1886,16 @@ class MatrioController:
         Returns:
             bool: True if command sent successfully
         """
-        return self._send_audio_control_command(zone_id, 'treble', treble)
+        return await self._send_audio_control_command(zone_id, 'treble', treble)
     
-    def trigger_hng_sync(self) -> Dict[str, Any] | None:
+    async def trigger_hng_sync(self) -> Dict[str, Any] | None:
         """
         Trigger HNG sync packet and decode all zone states
         
         Returns:
             Dict containing decoded zone states or None if failed
         """
-        if not self.socket:
+        if not self.writer:
             _LOGGER.error("Not connected to device")
             return None
         
@@ -1305,11 +1904,11 @@ class MatrioController:
             
             # Use the existing protocol command that we know works
             init_packet = bytes.fromhex("189618200f0000005706000000000000000000004d43552b5041532b820affffff8926")
-            self.socket.send(init_packet)
+            self.writer.write(init_packet)
+            await self.writer.drain()
             
             # Wait for HNG_SYNC_COMMAND response
-            self.socket.settimeout(5.0)
-            sync_response = self.socket.recv(1024)
+            sync_response = await asyncio.wait_for(self.reader.read(1024), timeout=5.0)
             if len(sync_response) == 0:
                 _LOGGER.debug("No sync response received")
                 return None
@@ -1317,7 +1916,7 @@ class MatrioController:
             _LOGGER.debug("Received sync response: %d bytes", len(sync_response))
             
             # Wait for ALLNAMES response
-            allnames_response = self.socket.recv(1024)
+            allnames_response = await asyncio.wait_for(self.reader.read(1024), timeout=5.0)
             if len(allnames_response) == 0:
                 _LOGGER.debug("No ALLNAMES response received")
                 return None
@@ -1398,7 +1997,7 @@ class MatrioController:
             _LOGGER.error("Failed to extract HNG sync packet: %s", e)
             return None
     
-    def get_zone_states(self, input_mappings: Dict[int, str]) -> Dict[str, Any]:
+    async def get_zone_states(self, input_mappings: Dict[int, str]) -> Dict[str, Any]:
         """
         Get current state of all zones using HNG sync
         
@@ -1415,7 +2014,7 @@ class MatrioController:
         else:
             _LOGGER.warning("No input mappings provided to get_zone_states")
         
-        hng_result = self.trigger_hng_sync()
+        hng_result = await self.trigger_hng_sync()
         if hng_result and 'zones' in hng_result:
             return hng_result['zones']
         return {}
