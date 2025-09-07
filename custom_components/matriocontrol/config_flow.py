@@ -11,7 +11,7 @@ from homeassistant.const import CONF_HOST, CONF_PORT
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import config_validation as cv
 
-from .const import DEFAULT_PORT, DEFAULT_ZONES, DOMAIN
+from .const import DEFAULT_PORT, DEFAULT_ZONES, DOMAIN, CONF_DEVICE_NAME, CONF_ZONES
 from .matrio_controller import MatrioController
 
 _LOGGER = logging.getLogger(__name__)
