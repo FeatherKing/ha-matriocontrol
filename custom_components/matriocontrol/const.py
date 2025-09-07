@@ -3,9 +3,10 @@
 DOMAIN = "matriocontrol"
 
 # Configuration keys
-CONF_HOST = "host"
-CONF_PORT = "port"
-CONF_ZONES = "zones"
+CONF_HOST = "IP Address"
+CONF_PORT = "Port"
+CONF_DEVICE_NAME = "Device Name"
+CONF_ZONES = "Number of Zones"
 
 # Default values
 DEFAULT_PORT = 8899
