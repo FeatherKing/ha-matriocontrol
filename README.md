@@ -60,7 +60,9 @@ Home Assistant integration for Dayton Audio multi-zone amplifiers using the Matr
     1. Zone and Input names will be gathered from the device
 
 ### Supported Devices
-- **Dayton Audio DAX88** (tested)
+- **Dayton Audio DAX88**
+
+## Untested but Should Work
 - **Other Dayton Audio multi-zone amplifiers** using Matrio Control protocol
 
 ## 📄 License
