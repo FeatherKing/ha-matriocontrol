@@ -25,3 +25,11 @@ class MatrioControlEntity(CoordinatorEntity[MatrioControlDataUpdateCoordinator])
             manufacturer=DEVICE_MANUFACTURER,
             model=DEVICE_MODEL,
         )
+        # Register this entity for direct state updates
+        coordinator.register_entity(self)
+    
+    async def async_will_remove_from_hass(self) -> None:
+        """Called when entity will be removed from Home Assistant."""
+        # Unregister from coordinator when entity is removed
+        self.coordinator.unregister_entity(self)
+        await super().async_will_remove_from_hass()

@@ -14,7 +14,7 @@ from .matrio_controller import MatrioController
 
 _LOGGER = logging.getLogger(__name__)
 
-UPDATE_INTERVAL = timedelta(seconds=300)  # Reduced polling - rely on broadcast updates
+UPDATE_INTERVAL = timedelta(seconds=60)  # Minimal polling - rely on broadcast updates for real-time changes
 
 
 class MatrioControlDataUpdateCoordinator(DataUpdateCoordinator):
@@ -27,6 +27,7 @@ class MatrioControlDataUpdateCoordinator(DataUpdateCoordinator):
             entry.data["host"], 
             entry.data["port"]
         )
+        self._entities = []  # Track entities for direct updates
         
         super().__init__(
             hass,
@@ -45,7 +46,9 @@ class MatrioControlDataUpdateCoordinator(DataUpdateCoordinator):
                 # Use the new async connect method with state callback
                 def state_callback(zones):
                     _LOGGER.debug("State callback received %d zones", len(zones))
-                    # Trigger coordinator update when state changes
+                    # Update entities directly for immediate state changes
+                    self._update_entities_from_zones(zones)
+                    # Also trigger coordinator update for data consistency
                     self.hass.async_create_task(self.async_request_refresh())
                 
                 connected = await self.controller.connect(state_callback)
@@ -132,3 +135,34 @@ class MatrioControlDataUpdateCoordinator(DataUpdateCoordinator):
                 "last_heartbeat": None,
                 "zone_states": {},
             }
+    
+    def register_entity(self, entity):
+        """Register an entity for direct state updates."""
+        if entity not in self._entities:
+            self._entities.append(entity)
+            _LOGGER.debug("Registered entity: %s", entity.entity_id)
+    
+    def unregister_entity(self, entity):
+        """Unregister an entity from direct state updates."""
+        if entity in self._entities:
+            self._entities.remove(entity)
+            _LOGGER.debug("Unregistered entity: %s", entity.entity_id)
+    
+    def _update_entities_from_zones(self, zones):
+        """Update all registered entities with new zone data."""
+        if not zones:
+            return
+        
+        _LOGGER.debug("Updating %d entities with zone data", len(self._entities))
+        
+        # Update coordinator data immediately
+        current_data = self.data or {}
+        current_data["zone_states"] = zones
+        self.data = current_data
+        
+        # Schedule entity updates on the event loop
+        for entity in self._entities:
+            if hasattr(entity, 'schedule_update_ha_state'):
+                # Use schedule_update_ha_state for immediate entity updates
+                entity.schedule_update_ha_state()
+                _LOGGER.debug("Scheduled update for entity: %s", entity.entity_id)

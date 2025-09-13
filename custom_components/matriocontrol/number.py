@@ -77,7 +77,7 @@ class MatrioControlBassNumber(MatrioControlEntity, NumberEntity):
     async def async_set_native_value(self, value: float) -> None:
         """Set the value."""
         await self.coordinator.controller.set_bass(self.zone_id, int(value))
-        await self.coordinator.async_request_refresh()
+        # State will be updated via broadcast callback
 
 
 class MatrioControlTrebleNumber(MatrioControlEntity, NumberEntity):
@@ -120,7 +120,7 @@ class MatrioControlTrebleNumber(MatrioControlEntity, NumberEntity):
     async def async_set_native_value(self, value: float) -> None:
         """Set the value."""
         await self.coordinator.controller.set_treble(self.zone_id, int(value))
-        await self.coordinator.async_request_refresh()
+        # State will be updated via broadcast callback
 
 
 class MatrioControlBalanceNumber(MatrioControlEntity, NumberEntity):
@@ -176,4 +176,4 @@ class MatrioControlBalanceNumber(MatrioControlEntity, NumberEntity):
     async def async_set_native_value(self, value: float) -> None:
         """Set the value."""
         await self.coordinator.controller.set_balance(self.zone_id, int(value))
-        await self.coordinator.async_request_refresh()
+        # State will be updated via broadcast callback

@@ -146,24 +146,24 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
     async def async_turn_on(self) -> None:
         """Turn the media player on."""
         await self.coordinator.controller.set_zone_power(self.zone_id, True)
-        await self.coordinator.async_request_refresh()
+        # State will be updated via broadcast callback
 
     async def async_turn_off(self) -> None:
         """Turn the media player off."""
         await self.coordinator.controller.set_zone_power(self.zone_id, False)
-        await self.coordinator.async_request_refresh()
+        # State will be updated via broadcast callback
 
     async def async_set_volume_level(self, volume: float) -> None:
         """Set volume level, range 0..1."""
         # Convert from 0..1 to 0..38 range used by MatrioController
         volume_level = int(volume * VOLUME_MAX)
         await self.coordinator.controller.set_volume(self.zone_id, volume_level)
-        await self.coordinator.async_request_refresh()
+        # State will be updated via broadcast callback
 
     async def async_mute_volume(self, mute: bool) -> None:
         """Mute the volume."""
         await self.coordinator.controller.set_mute(self.zone_id, mute)
-        await self.coordinator.async_request_refresh()
+        # State will be updated via broadcast callback
 
     async def async_select_source(self, source: str) -> None:
         """Select input source."""
@@ -195,8 +195,7 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
         if input_id:
             _LOGGER.debug("Calling controller.set_input(%s, %s)", self.zone_id, input_id)
             await self.coordinator.controller.set_input(self.zone_id, input_id)
-            _LOGGER.debug("Requesting coordinator refresh")
-            await self.coordinator.async_request_refresh()
+            # State will be updated via broadcast callback
             _LOGGER.debug("async_select_source completed for zone %s", self.zone_id)
         else:
             _LOGGER.debug("No input_id found for source '%s'", source)
