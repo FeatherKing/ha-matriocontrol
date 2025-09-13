@@ -57,8 +57,9 @@ class MatrioControlBassNumber(MatrioControlEntity, NumberEntity):
     @property
     def name(self) -> str:
         """Return the name of the entity."""
-        zone_names = self.coordinator.data.get("zone_names", {})
-        zone_name = zone_names.get(self.zone_id, f"Zone {self.zone_id}")
+        zones = self.coordinator.data.get("zones", {})
+        zone_key = f"zone_{self.zone_id}"
+        zone_name = zones.get(zone_key, f"Zone {self.zone_id}")
         return f"{zone_name} Bass"
 
     @property
@@ -75,9 +76,7 @@ class MatrioControlBassNumber(MatrioControlEntity, NumberEntity):
 
     async def async_set_native_value(self, value: float) -> None:
         """Set the value."""
-        await self.hass.async_add_executor_job(
-            self.coordinator.controller.set_bass, self.zone_id, int(value)
-        )
+        await self.coordinator.controller.set_bass(self.zone_id, int(value))
         await self.coordinator.async_request_refresh()
 
 
@@ -101,8 +100,9 @@ class MatrioControlTrebleNumber(MatrioControlEntity, NumberEntity):
     @property
     def name(self) -> str:
         """Return the name of the entity."""
-        zone_names = self.coordinator.data.get("zone_names", {})
-        zone_name = zone_names.get(self.zone_id, f"Zone {self.zone_id}")
+        zones = self.coordinator.data.get("zones", {})
+        zone_key = f"zone_{self.zone_id}"
+        zone_name = zones.get(zone_key, f"Zone {self.zone_id}")
         return f"{zone_name} Treble"
 
     @property
@@ -119,9 +119,7 @@ class MatrioControlTrebleNumber(MatrioControlEntity, NumberEntity):
 
     async def async_set_native_value(self, value: float) -> None:
         """Set the value."""
-        await self.hass.async_add_executor_job(
-            self.coordinator.controller.set_treble, self.zone_id, int(value)
-        )
+        await self.coordinator.controller.set_treble(self.zone_id, int(value))
         await self.coordinator.async_request_refresh()
 
 
@@ -145,8 +143,9 @@ class MatrioControlBalanceNumber(MatrioControlEntity, NumberEntity):
     @property
     def name(self) -> str:
         """Return the name of the entity."""
-        zone_names = self.coordinator.data.get("zone_names", {})
-        zone_name = zone_names.get(self.zone_id, f"Zone {self.zone_id}")
+        zones = self.coordinator.data.get("zones", {})
+        zone_key = f"zone_{self.zone_id}"
+        zone_name = zones.get(zone_key, f"Zone {self.zone_id}")
         return f"{zone_name} Balance"
 
     @property
@@ -176,7 +175,5 @@ class MatrioControlBalanceNumber(MatrioControlEntity, NumberEntity):
 
     async def async_set_native_value(self, value: float) -> None:
         """Set the value."""
-        await self.hass.async_add_executor_job(
-            self.coordinator.controller.set_balance, self.zone_id, int(value)
-        )
+        await self.coordinator.controller.set_balance(self.zone_id, int(value))
         await self.coordinator.async_request_refresh()

@@ -323,17 +323,33 @@ class BroadcastDecoder:
             _LOGGER.debug("BroadcastDecoder: Command data too short")
             return None
             
-        # Extract value (first byte) and zone pattern (remaining 7 bytes)
+        # Extract value (first byte) and zone pattern (remaining bytes)
         value = data[0]
-        zone_pattern = data[1:8]  # 7 bytes for zones 1-7 (0-based indexing)
+        zone_pattern = data[1:]  # All bytes except the first (value byte) for zones 1-8
         
         _LOGGER.debug(f"BroadcastDecoder: Command 0x{command:02x}, value 0x{value:02x}, zone_pattern {zone_pattern.hex()}")
         
         # Find which zones are affected (0-based indexing)
         affected_zones = []
-        for i, zone_val in enumerate(zone_pattern):
-            if zone_val == 0x01:
-                affected_zones.append(i + 1)  # Convert to 1-based for display
+        
+        # Handle 8-byte zone pattern (zones 1-8)
+        if len(zone_pattern) == 8:
+            for i, zone_val in enumerate(zone_pattern):
+                if zone_val == 0x01:
+                    affected_zones.append(i + 1)  # Convert to 1-based for display
+        # Handle 7-byte zone pattern (zones 1-7) with special zone 8 handling
+        elif len(zone_pattern) == 7:
+            for i, zone_val in enumerate(zone_pattern):
+                if zone_val == 0x01:
+                    affected_zones.append(i + 1)  # Convert to 1-based for display
+            # Check if this is a zone 8 pattern (all 0x02 values in 7-byte pattern)
+            if all(zone_val == 0x02 for zone_val in zone_pattern):
+                affected_zones.append(8)
+        else:
+            # Fallback: treat as zones 1-N where N is the length
+            for i, zone_val in enumerate(zone_pattern):
+                if zone_val == 0x01:
+                    affected_zones.append(i + 1)  # Convert to 1-based for display
         
         _LOGGER.debug(f"BroadcastDecoder: Affected zones: {affected_zones}")
         

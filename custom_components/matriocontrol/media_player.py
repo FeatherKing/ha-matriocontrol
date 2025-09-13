@@ -59,8 +59,11 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
     @property
     def name(self) -> str:
         """Return the name of the entity."""
-        zone_names = self.coordinator.data.get("zone_names", {})
-        return zone_names.get(self.zone_id, f"Zone {self.zone_id}")
+        zones = self.coordinator.data.get("zones", {})
+        zone_key = f"zone_{self.zone_id}"
+        zone_name = zones.get(zone_key, f"Zone {self.zone_id}")
+        _LOGGER.debug("Media player Zone %d name: %s (zones data: %s)", self.zone_id, zone_name, zones)
+        return zone_name
 
     @property
     def state(self) -> MediaPlayerState:

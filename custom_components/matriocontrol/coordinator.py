@@ -1,6 +1,7 @@
 """Data update coordinator for Matrio Control."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import timedelta
 
@@ -64,13 +65,49 @@ class MatrioControlDataUpdateCoordinator(DataUpdateCoordinator):
             zone_states = self.controller.zones.copy()
             _LOGGER.debug("Retrieved %d zones from controller", len(zone_states))
             
+            # If we don't have zone states yet, wait for them to be populated
+            if not zone_states:
+                _LOGGER.debug("Zone states not available yet, waiting for device state...")
+                # Wait up to 5 seconds for zone states to be populated
+                for _ in range(50):  # 50 * 0.1 = 5 seconds
+                    await asyncio.sleep(0.1)
+                    zone_states = self.controller.zones.copy()
+                    if zone_states:
+                        _LOGGER.debug("Zone states now available: %d zones", len(zone_states))
+                        break
+                else:
+                    _LOGGER.warning("Zone states not available after waiting, using empty states")
+            
             # Get actual zone and input names from controller
             zone_names = getattr(self.controller, 'zone_names', {})
             input_mappings = self.controller.get_available_inputs()
             
+            # If we don't have zone names yet, wait for them to be populated
+            if not zone_names:
+                _LOGGER.debug("Zone names not available yet, waiting for device initialization...")
+                # Wait up to 5 seconds for zone names to be populated
+                for _ in range(50):  # 50 * 0.1 = 5 seconds
+                    await asyncio.sleep(0.1)
+                    zone_names = getattr(self.controller, 'zone_names', {})
+                    if zone_names:
+                        _LOGGER.debug("Zone names now available: %s", zone_names)
+                        break
+                else:
+                    _LOGGER.warning("Zone names not available after waiting, using defaults")
+            
+            _LOGGER.debug("Zone names from controller: %s", zone_names)
+            _LOGGER.debug("Zone names type: %s", type(zone_names))
+            
+            # Create zones dictionary with proper names
+            zones_dict = {}
+            for i in range(1, 9):
+                zone_name = zone_names.get(i, f"Zone {i}")
+                zones_dict[f"zone_{i}"] = zone_name
+                _LOGGER.debug("Zone %d: %s", i, zone_name)
+            
             result = {
                 "connected": True,
-                "zones": {f"zone_{i}": zone_names.get(i, f"Zone {i}") for i in range(1, 9)},
+                "zones": zones_dict,
                 "inputs": input_mappings,
                 "device_info": {},
                 "names": {},
