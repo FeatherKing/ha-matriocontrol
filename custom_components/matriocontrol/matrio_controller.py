@@ -606,7 +606,7 @@ class MatrioController:
             while self.connected:
                 try:
                     # Read data with timeout
-                    data = await asyncio.wait_for(self.reader.read(1024), timeout=1.0)
+                    data = await asyncio.wait_for(self.reader.read(1024), timeout=5.0)
                     
                     if len(data) == 0:
                         _LOGGER.warning("Connection lost - received empty data")
@@ -656,120 +656,17 @@ class MatrioController:
             self.connected = False
     
     async def _get_initial_state(self):
-        """Get initial device state via HNG sync"""
+        """Get initial device state - now handled in binary initialization"""
         try:
-            _LOGGER.debug("Starting initial state retrieval via HNG sync...")
+            _LOGGER.debug("Initial state already retrieved during binary initialization")
             
-            # Send initialization command
-            init_packet = bytes.fromhex("189618200f0000005706000000000000000000004d43552b5041532b820affffff8926")
-            _LOGGER.debug(f"Sending initialization packet: {init_packet.hex()}")
-            self.writer.write(init_packet)
-            await self.writer.drain()
-            _LOGGER.debug("Initialization packet sent successfully")
-            
-            # Wait for responses (device might send both HNG sync and ALLNAMES together)
-            _LOGGER.debug("Waiting for device responses...")
-            response = await asyncio.wait_for(self.reader.read(2048), timeout=10.0)
-            if len(response) == 0:
-                _LOGGER.warning("No response received from device")
-                return
-            
-            _LOGGER.debug("Received response: %d bytes - %s", len(response), response.hex()[:200])
-            
-            # The device might send both HNG sync and ALLNAMES in one packet
-            # or in separate packets. Let's try to parse what we got.
-            sync_response = response
-            allnames_response = b""
-            
-            # Check if this looks like a combined response
-            if len(response) > 200:  # Likely contains both responses
-                _LOGGER.debug("Detected combined response, attempting to split...")
-                # Try to find the boundary between HNG sync and ALLNAMES
-                # Look for the ALLNAMES command pattern (0x8215)
-                allnames_start = response.find(b'\x82\x15')
-                if allnames_start > 0:
-                    sync_response = response[:allnames_start]
-                    allnames_response = response[allnames_start:]
-                    _LOGGER.debug("Split response: sync=%d bytes, allnames=%d bytes", 
-                                len(sync_response), len(allnames_response))
-                else:
-                    _LOGGER.debug("Could not find ALLNAMES boundary, using full response as sync")
+            # Notify callback of initial state if we have zone data
+            if self.zones and self.state_callback:
+                _LOGGER.debug("Calling state callback with initial state...")
+                self.state_callback(self.zones)
+                _LOGGER.debug("State callback completed")
             else:
-                # Single response, try to get ALLNAMES separately
-                _LOGGER.debug("Single response received, waiting for ALLNAMES...")
-                try:
-                    allnames_response = await asyncio.wait_for(self.reader.read(1024), timeout=5.0)
-                    if len(allnames_response) > 0:
-                        _LOGGER.debug("Received separate ALLNAMES response: %d bytes", len(allnames_response))
-                    else:
-                        _LOGGER.debug("No separate ALLNAMES response received")
-                except asyncio.TimeoutError:
-                    _LOGGER.debug("Timeout waiting for ALLNAMES response")
-                    allnames_response = b""
-            
-            # Parse ALLNAMES response to get device names
-            if len(allnames_response) > 0:
-                try:
-                    # Parse the ALLNAMES response directly
-                    allnames_data = self._parse_allnames_response(allnames_response)
-                    _LOGGER.info("Parsed ALLNAMES data: %s", allnames_data)
-                    
-                    # Update input mappings with actual device names
-                    for i in range(1, 9):
-                        input_key = f"input_{i}"
-                        if input_key in allnames_data:
-                            self.inputs[i] = allnames_data[input_key]
-                            _LOGGER.debug("Updated input %d: %s", i, allnames_data[input_key])
-                    
-                    # Store zone names
-                    self.zone_names = {}
-                    for i in range(8):
-                        zone_key = f"zone_{i}"
-                        if zone_key in allnames_data:
-                            self.zone_names[i+1] = allnames_data[zone_key]
-                            _LOGGER.debug("Updated zone %d: %s", i+1, allnames_data[zone_key])
-                            
-                except Exception as e:
-                    _LOGGER.warning("Failed to parse ALLNAMES response: %s", e)
-            else:
-                _LOGGER.warning("No ALLNAMES response received, using default names")
-                # Set default names if ALLNAMES parsing failed
-                self.zone_names = {i: f"Zone {i}" for i in range(1, 9)}
-            
-            # Look for HNG sync packet in the responses
-            combined_data = sync_response + allnames_response
-            _LOGGER.debug("Combined data: %d bytes total", len(combined_data))
-            
-            # Check if this is a concatenated packet (multiple HNG sync packets)
-            if len(combined_data) > 100:  # Likely concatenated packets
-                _LOGGER.debug("Detected concatenated packets, extracting HNG sync...")
-                hng_hex = self._extract_hng_sync_packet(combined_data)
-                if not hng_hex:
-                    _LOGGER.warning("Could not extract HNG sync packet from concatenated data")
-                    return
-                _LOGGER.debug("Extracted HNG sync packet: %d bytes", len(bytes.fromhex(hng_hex)))
-            else:
-                hng_hex = combined_data.hex()
-                _LOGGER.debug("Using combined data directly as HNG sync packet")
-            
-            # Decode the packet
-            _LOGGER.debug("Decoding HNG sync packet with input mappings: %s", self.inputs)
-            result = self.hng_decoder.decode_hng_sync_packet(hng_hex, self.inputs)
-            
-            if result and 'zones' in result:
-                self.zones = result['zones']
-                _LOGGER.info("Initial state received: %d zones", len(self.zones))
-                _LOGGER.debug("Zone details: %s", {k: v for k, v in self.zones.items()})
-                
-                # Notify callback of initial state
-                if self.state_callback:
-                    _LOGGER.debug("Calling state callback with initial state...")
-                    self.state_callback(self.zones)
-                    _LOGGER.debug("State callback completed")
-                else:
-                    _LOGGER.debug("No state callback set")
-            else:
-                _LOGGER.warning("Could not decode initial state - result: %s", result)
+                _LOGGER.debug("No zone data or state callback available")
                 
         except Exception as e:
             _LOGGER.error(f"Failed to get initial state: {e}")
@@ -793,16 +690,28 @@ class MatrioController:
             # The payload structure:
             # MCU+PAS+ (8 bytes) + 8215 (2 bytes) + length (1 byte) + device_name + zone_names + input_names
             
-            # Skip MCU+PAS+ and command (10 bytes)
-            data_start = 10
-            if len(payload) < data_start:
-                raise RuntimeError("Payload too short")
-            
-            data = payload[data_start:]
+            # The data starts immediately after the protocol header
+            data = payload
+            _LOGGER.debug("ALLNAMES data length: %d bytes", len(data))
+            _LOGGER.debug("ALLNAMES data hex: %s", data.hex()[:200])
             
             # Parse length-prefixed strings
             names = {}
             pos = 0
+            
+            # Skip MCU+PAS+ (8 bytes) and 8215 command (2 bytes)
+            if len(data) < 10:
+                raise RuntimeError("Data too short for MCU+PAS+ and command")
+            
+            # Verify MCU+PAS+ header
+            if data[0:8] != b'MCU+PAS+':
+                raise RuntimeError("Invalid MCU+PAS+ header")
+            
+            # Verify 8215 command
+            if data[8:10] != b'\x82\x15':
+                raise RuntimeError("Invalid 8215 command")
+            
+            pos = 10  # Skip MCU+PAS+ and 8215 command
             
             # First string is device name (length 0x0b = 11 bytes)
             if pos + 1 > len(data):
@@ -810,49 +719,79 @@ class MatrioController:
             
             device_name_len = data[pos]
             pos += 1
+            _LOGGER.debug("Device name length: %d (0x%02x)", device_name_len, device_name_len)
             
             if pos + device_name_len > len(data):
                 raise RuntimeError("Device name extends beyond data")
             
             device_name = data[pos:pos + device_name_len].decode('ascii', errors='ignore')
             pos += device_name_len
+            _LOGGER.debug("Device name: '%s'", device_name)
             
             # Parse zone names (8 zones)
             zone_names = []
             for zone_id in range(8):
                 if pos >= len(data):
-                    break
+                    _LOGGER.debug("Reached end of data at zone %d, pos=%d, len=%d", zone_id, pos, len(data))
+                    zone_names.append(f"Zone {zone_id + 1}")  # Add fallback name
+                    continue
+                
+                if pos + 1 > len(data):
+                    _LOGGER.debug("No length byte for zone %d, pos=%d, len=%d", zone_id, pos, len(data))
+                    zone_names.append(f"Zone {zone_id + 1}")  # Add fallback name
+                    continue
                 
                 name_len = data[pos]
                 pos += 1
+                _LOGGER.debug("Zone %d name length: %d (0x%02x), pos=%d", zone_id, name_len, name_len, pos)
                 
                 if pos + name_len > len(data):
-                    break
+                    _LOGGER.debug("Zone %d name extends beyond data, pos=%d, name_len=%d, data_len=%d", zone_id, pos, name_len, len(data))
+                    zone_names.append(f"Zone {zone_id + 1}")  # Add fallback name
+                    continue
                 
                 zone_name = data[pos:pos + name_len].decode('ascii', errors='ignore')
+                # Truncate to 16 characters if longer
+                if len(zone_name) > 16:
+                    zone_name = zone_name[:16]
                 zone_names.append(zone_name)
+                _LOGGER.debug("Zone %d name: '%s', pos after: %d", zone_id, zone_name, pos + name_len)
                 pos += name_len
             
             # Parse input names (8 inputs)
             input_names = []
             for input_id in range(8):
                 if pos >= len(data):
+                    _LOGGER.debug("Reached end of data at input %d, pos=%d, len=%d", input_id, pos, len(data))
                     # If we've reached the end of data, Input 8 is typically "Wi-Fi"
+                    if input_id == 7:  # Input 8 (index 7)
+                        input_names.append("Wi-Fi")
+                    break
+                
+                if pos + 1 > len(data):
+                    _LOGGER.debug("No length byte for input %d, pos=%d, len=%d", input_id, pos, len(data))
+                    # If we can't read the full name, Input 8 is typically "Wi-Fi"
                     if input_id == 7:  # Input 8 (index 7)
                         input_names.append("Wi-Fi")
                     break
                 
                 name_len = data[pos]
                 pos += 1
+                _LOGGER.debug("Input %d name length: %d (0x%02x), pos=%d", input_id, name_len, name_len, pos)
                 
                 if pos + name_len > len(data):
+                    _LOGGER.debug("Input %d name extends beyond data, pos=%d, name_len=%d, data_len=%d", input_id, pos, name_len, len(data))
                     # If we can't read the full name, Input 8 is typically "Wi-Fi"
                     if input_id == 7:  # Input 8 (index 7)
                         input_names.append("Wi-Fi")
                     break
                 
                 input_name = data[pos:pos + name_len].decode('ascii', errors='ignore')
+                # Truncate to 16 characters if longer
+                if len(input_name) > 16:
+                    input_name = input_name[:16]
                 input_names.append(input_name)
+                _LOGGER.debug("Input %d name: '%s', pos after: %d", input_id, input_name, pos + name_len)
                 pos += name_len
             
             # Ensure we have exactly 8 input names (pad with "Wi-Fi" for Input 8 if missing)
@@ -861,6 +800,9 @@ class MatrioController:
                     input_names.append("Wi-Fi")
                 else:
                     input_names.append(f"Input{len(input_names) + 1}")
+            
+            _LOGGER.debug("Parsed zone names: %s", zone_names)
+            _LOGGER.debug("Parsed input names: %s", input_names)
             
             # Build the names dictionary
             for i, zone_name in enumerate(zone_names):
@@ -872,6 +814,8 @@ class MatrioController:
             return names
             
         except Exception as e:
+            _LOGGER.error("ALLNAMES parsing failed: %s", e)
+            _LOGGER.debug("Response that failed to parse: %s", response.hex())
             raise RuntimeError(f"Failed to parse zone/input names from response: {e}")
     
     async def _handle_broadcast(self, broadcast_info: Dict[str, Any]):
@@ -1110,6 +1054,63 @@ class MatrioController:
             allnames_response = await asyncio.wait_for(self.reader.read(1024), timeout=5.0)
             if len(allnames_response) == 0:
                 return False
+            
+            # Parse ALLNAMES response to get device names immediately
+            try:
+                _LOGGER.debug("ALLNAMES response length: %d bytes", len(allnames_response))
+                _LOGGER.debug("ALLNAMES response hex: %s", allnames_response.hex()[:100])
+                
+                allnames_data = self._parse_allnames_response(allnames_response)
+                _LOGGER.info("Parsed ALLNAMES data: %s", allnames_data)
+                
+                # Update input mappings with actual device names
+                for i in range(1, 9):
+                    input_key = f"input_{i}"
+                    if input_key in allnames_data:
+                        self.inputs[i] = allnames_data[input_key]
+                        _LOGGER.debug("Updated input %d: %s", i, allnames_data[input_key])
+                
+                # Store zone names
+                self.zone_names = {}
+                for i in range(8):
+                    zone_key = f"zone_{i}"
+                    if zone_key in allnames_data:
+                        self.zone_names[i+1] = allnames_data[zone_key]
+                        _LOGGER.debug("Updated zone %d: %s", i+1, allnames_data[zone_key])
+                        
+            except Exception as e:
+                _LOGGER.warning("Failed to parse ALLNAMES response: %s", e)
+                _LOGGER.debug("ALLNAMES response that failed to parse: %s", allnames_response.hex())
+                # Set default names if ALLNAMES parsing failed
+                self.zone_names = {i: f"Zone {i}" for i in range(1, 9)}
+            
+            # Extract HNG sync data from the combined responses (like broadcast decoder)
+            _LOGGER.debug("Extracting HNG sync data from combined responses...")
+            combined_data = sync_response + allnames_response
+            _LOGGER.debug("Combined data: %d bytes", len(combined_data))
+            
+            # Extract HNG sync packet from the combined data
+            hng_hex = self._extract_hng_sync_packet(combined_data)
+            if hng_hex:
+                _LOGGER.debug("Extracted HNG sync packet: %d bytes", len(hng_hex) // 2)
+                
+                # Decode the HNG sync packet to get initial zone states
+                result = self.hng_decoder.decode_hng_sync_packet(hng_hex, self.inputs)
+                
+                if result and 'zones' in result:
+                    self.zones = result['zones']
+                    _LOGGER.info("Initial zone states received: %d zones", len(self.zones))
+                    _LOGGER.debug("Zone details: %s", {k: v for k, v in self.zones.items()})
+                else:
+                    _LOGGER.warning("Could not decode HNG sync packet")
+                    # Set default zone states if HNG sync fails
+                    self.zones = {i: {'power': 'OFF', 'input': 'Input1', 'volume': 0, 'mute': 'DEFAULT', 'balance': 'Default', 'bass': 0, 'treble': 0} for i in range(1, 9)}
+                    _LOGGER.info("Using default zone states due to HNG sync decode failure")
+            else:
+                _LOGGER.warning("Could not extract HNG sync packet from combined data")
+                # Set default zone states if HNG sync extraction fails
+                self.zones = {i: {'power': 'OFF', 'input': 'Input1', 'volume': 0, 'mute': 'DEFAULT', 'balance': 'Default', 'bass': 0, 'treble': 0} for i in range(1, 9)}
+                _LOGGER.info("Using default zone states due to HNG sync extraction failure")
             
             return True
             
