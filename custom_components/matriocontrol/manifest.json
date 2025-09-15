@@ -5,9 +5,9 @@
   "config_flow": true,
   "dependencies": [],
   "documentation": "https://github.com/FeatherKing/ha-matriocontrol",
-  "issue_tracker": "https://github.com/FeatherKing/ha-matriocontrol/issues",
   "integration_type": "hub",
   "iot_class": "local_push",
+  "issue_tracker": "https://github.com/FeatherKing/ha-matriocontrol/issues",
   "requirements": [],
   "version": "1.0.4"
 }
