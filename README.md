@@ -7,8 +7,8 @@ Home Assistant integration for Dayton Audio multi-zone amplifiers using the Matr
 ### **Control your device over TCP/IP instead of Serial**
 - **No Extra Device Required for Control**: Many integrations for Xantech/Dayton Audio require usb-to-serial connections. This integration controls devices over the network instead.
 
-### **"Almost" real-time control**
-- This integration makes a connection and then listens to the device for broadcasts. Due to this design in the mobile app, the updates are **almost** real-time. Commands are sent immediately, but sometimes Home Assistant doesnt reflect state for 7-10 seconds.
+### **Real-time control**
+- This integration makes a connection and then listens to the device for broadcasts. Broadcasts on 8899 are decoded and Home Assistant entities are updated immediately.
 
 ### **Complete Device Control**
 - **Configurable Number of Zones**: Full control over each zone
