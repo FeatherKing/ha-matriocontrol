@@ -1,7 +1,6 @@
 {
   "name": "Matrio Control",
   "content_in_root": false,
-  "filename": "matriocontrol",
   "country": ["US"],
-  "homeassistant": "2025.8.3"
+  "homeassistant": "2021.9.0"
 }
