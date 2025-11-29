@@ -67,17 +67,13 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
         self._base_features = base_features
         self._attr_supported_features = self._base_features
         
-        # Cache for efficient property access
-        self._cached_zone_state = None
-        self._cached_child_entity = None
-        self._cache_valid = False
-        
         # Initialize child entity tracking (but defer feature update until hass is available)
         self._current_child_entity_id = self._get_child_entity_id()
     
     def schedule_update_ha_state(self):
-        """Schedule an update and invalidate cache."""
-        self._cache_valid = False
+        """Schedule an update."""
+        # Check for child entity changes and update features
+        self._get_child_entity_id()  # This will trigger feature update if child changed
         super().schedule_update_ha_state()
 
     def _get_child_entity_id(self) -> str | None:
@@ -127,39 +123,25 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
         # Look up mapped child entity
         return result
 
-    def _refresh_cache(self):
-        """Refresh cached zone state and child entity data."""
-        # Get fresh zone state
-        zone_states = self.coordinator.data.get("zone_states", {})
-        self._cached_zone_state = zone_states.get(self.zone_id)
-        
-        # Get fresh child entity
-        if self.hass and self._current_child_entity_id:
-            self._cached_child_entity = self.hass.states.get(self._current_child_entity_id)
-            _LOGGER.debug("Zone %d cache refresh: hass=%s, child_id=%s, child_entity=%s", 
-                         self.zone_id, self.hass is not None, self._current_child_entity_id, 
-                         self._cached_child_entity is not None)
-        else:
-            self._cached_child_entity = None
-            _LOGGER.debug("Zone %d cache refresh: no hass or child_id (hass=%s, child_id=%s)", 
-                         self.zone_id, self.hass is not None, self._current_child_entity_id)
-            
-        self._cache_valid = True
 
     def _get_zone_state(self) -> dict | None:
-        """Get cached zone state, refreshing if needed."""
-        if not self._cache_valid:
-            self._refresh_cache()
-        return self._cached_zone_state
+        """Get zone state from coordinator data."""
+        zone_states = self.coordinator.data.get("zone_states", {})
+        return zone_states.get(self.zone_id)
 
     def _get_child_entity(self):
-        """Get the cached child media player entity object."""
-        if not self._cache_valid:
-            self._refresh_cache()
-        return self._cached_child_entity
+        """Get the child media player entity object."""
+        child_entity_id = self._get_child_entity_id()
+        if child_entity_id and self.hass:
+            return self.hass.states.get(child_entity_id)
+        return None
 
     def _update_supported_features(self):
         """Update supported features based on child entity capabilities."""
+        # Don't try to access child entities before hass is available
+        if not self.hass:
+            return
+            
         child_entity = self._get_child_entity()
         child_entity_id = self._current_child_entity_id
         
@@ -170,6 +152,9 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
             # Get child entity's actual supported features
             child_features = child_entity.attributes.get("supported_features", 0)
             
+            _LOGGER.debug("Zone %d child %s: state=%s, attrs=%s", 
+                         self.zone_id, child_entity_id, child_entity.state, 
+                         dict(child_entity.attributes))
             _LOGGER.debug("Zone %d child %s has features=0x%x", 
                          self.zone_id, child_entity_id, child_features)
             
@@ -226,8 +211,33 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
                     
                 if old_features != new_features or old_available != new_available:
                     # Child entity supported features changed or availability changed - update our features
-                    self._update_supported_features()
+                    _LOGGER.debug("Zone %d child entity features/availability changed, forcing resolution", self.zone_id)
+                    self._force_child_entity_resolution()
+                    return  # _force_child_entity_resolution calls async_write_ha_state if needed
             
+            self.async_write_ha_state()
+    
+    def _force_child_entity_resolution(self):
+        """Force immediate child entity resolution and feature update."""
+        if not self._current_child_entity_id:
+            return
+            
+        old_features = self._attr_supported_features
+        child_entity = self._get_child_entity()
+        
+        _LOGGER.debug("Zone %d force resolution: child_id=%s, found=%s", 
+                     self.zone_id, self._current_child_entity_id, child_entity is not None)
+        
+        if child_entity:
+            _LOGGER.info("Zone %d resolved child entity %s: state=%s, features=0x%x", 
+                       self.zone_id, self._current_child_entity_id, child_entity.state,
+                       child_entity.attributes.get("supported_features", 0))
+            
+        self._update_supported_features()
+        
+        if old_features != self._attr_supported_features:
+            _LOGGER.info("Zone %d features changed: 0x%x -> 0x%x", 
+                       self.zone_id, old_features, self._attr_supported_features)
             self.async_write_ha_state()
     
     async def _sync_with_child_group(self):
@@ -460,7 +470,6 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
             return zone_state["input"]
         
         return None
-        return None
 
     @property
     def volume_level(self) -> float | None:
@@ -635,29 +644,33 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
         # Update supported features based on current child entity
         self._update_supported_features()
         
-        # Set up listener for when Home Assistant has fully started
-        # This ensures child entities are available before trying to resolve them
+        # Set up child entity state change listener to detect when child becomes available
         if self._current_child_entity_id:
+            # Listen for when our specific child entity becomes available or changes
             @callback
-            def handle_ha_started(event):
-                """Handle Home Assistant started event."""
-                self._cache_valid = False  # Force cache refresh
-                child_entity = self._get_child_entity()
-                _LOGGER.debug("Zone %d HA started: child_entity_id=%s, found=%s", 
-                             self.zone_id, self._current_child_entity_id, child_entity is not None)
-                
-                if child_entity:
-                    self._update_supported_features()
-                    self.async_write_ha_state()
-                    _LOGGER.info("Zone %d found child entity %s after HA startup", 
-                               self.zone_id, self._current_child_entity_id)
-                else:
-                    _LOGGER.warning("Zone %d could not find child entity %s even after HA startup", 
-                                  self.zone_id, self._current_child_entity_id)
+            def handle_child_entity_registry_update(event):
+                """Handle when child entity is added to or updated in the registry."""
+                if event.data.get("entity_id") == self._current_child_entity_id:
+                    _LOGGER.debug("Zone %d detected child entity registry change: %s", 
+                                 self.zone_id, self._current_child_entity_id)
+                    self._force_child_entity_resolution()
             
-            # Listen for the homeassistant_started event
+            # Listen for state_changed events for our child entity
+            @callback 
+            def handle_child_entity_state_added(event):
+                """Handle when child entity state becomes available."""
+                if (event.data.get("entity_id") == self._current_child_entity_id and
+                    event.data.get("old_state") is None):
+                    _LOGGER.debug("Zone %d child entity state became available: %s", 
+                                 self.zone_id, self._current_child_entity_id)
+                    self._force_child_entity_resolution()
+            
+            # Set up listeners
             self.async_on_remove(
-                self.hass.bus.async_listen_once("homeassistant_started", handle_ha_started)
+                self.hass.bus.async_listen("entity_registry_updated", handle_child_entity_registry_update)
+            )
+            self.async_on_remove(
+                self.hass.bus.async_listen("state_changed", handle_child_entity_state_added)
             )
     
     async def async_will_remove_from_hass(self) -> None:
