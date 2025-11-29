@@ -76,6 +76,7 @@ class MatrioControlDataUpdateCoordinator(DataUpdateCoordinator):
                         "device_info": {},
                         "last_heartbeat": None,
                         "zone_states": {},
+                        "child_entity_mappings": self.child_entity_mappings,
                     }
                 _LOGGER.debug("Connection successful")
             
