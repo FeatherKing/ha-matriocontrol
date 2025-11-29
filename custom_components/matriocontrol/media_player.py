@@ -136,8 +136,13 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
         # Get fresh child entity
         if self.hass and self._current_child_entity_id:
             self._cached_child_entity = self.hass.states.get(self._current_child_entity_id)
+            _LOGGER.debug("Zone %d cache refresh: hass=%s, child_id=%s, child_entity=%s", 
+                         self.zone_id, self.hass is not None, self._current_child_entity_id, 
+                         self._cached_child_entity is not None)
         else:
             self._cached_child_entity = None
+            _LOGGER.debug("Zone %d cache refresh: no hass or child_id (hass=%s, child_id=%s)", 
+                         self.zone_id, self.hass is not None, self._current_child_entity_id)
             
         self._cache_valid = True
 
@@ -629,6 +634,31 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
         
         # Update supported features based on current child entity
         self._update_supported_features()
+        
+        # Set up listener for when Home Assistant has fully started
+        # This ensures child entities are available before trying to resolve them
+        if self._current_child_entity_id:
+            @callback
+            def handle_ha_started(event):
+                """Handle Home Assistant started event."""
+                self._cache_valid = False  # Force cache refresh
+                child_entity = self._get_child_entity()
+                _LOGGER.debug("Zone %d HA started: child_entity_id=%s, found=%s", 
+                             self.zone_id, self._current_child_entity_id, child_entity is not None)
+                
+                if child_entity:
+                    self._update_supported_features()
+                    self.async_write_ha_state()
+                    _LOGGER.info("Zone %d found child entity %s after HA startup", 
+                               self.zone_id, self._current_child_entity_id)
+                else:
+                    _LOGGER.warning("Zone %d could not find child entity %s even after HA startup", 
+                                  self.zone_id, self._current_child_entity_id)
+            
+            # Listen for the homeassistant_started event
+            self.async_on_remove(
+                self.hass.bus.async_listen_once("homeassistant_started", handle_ha_started)
+            )
     
     async def async_will_remove_from_hass(self) -> None:
         """Called when entity will be removed from hass."""
