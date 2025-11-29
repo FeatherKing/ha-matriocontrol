@@ -103,9 +103,17 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
     def _update_supported_features(self):
         """Update supported features based on child entity capabilities."""
         child_entity = self._get_child_entity()
+        child_entity_id = self._current_child_entity_id
+        
+        _LOGGER.debug("Zone %d _update_supported_features: child_entity_id=%s, child_entity=%s", 
+                     self.zone_id, child_entity_id, child_entity is not None)
+        
         if child_entity and child_entity.state != "unavailable":
             # Get child entity's actual supported features
             child_features = child_entity.attributes.get("supported_features", 0)
+            
+            _LOGGER.debug("Zone %d child %s has features=0x%x", 
+                         self.zone_id, child_entity_id, child_features)
             
             # Combine base receiver features with child's media playback features
             # Filter child features to only include ones that make sense to pass through
@@ -132,6 +140,8 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
                          passthrough_features, self._attr_supported_features)
         else:
             self._attr_supported_features = self._base_features
+            _LOGGER.debug("Zone %d no child entity or unavailable, using base features=0x%x", 
+                         self.zone_id, self._base_features)
     
     @callback
     def _child_entity_changed(self, event):
@@ -595,17 +605,24 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
         """Handle updated data from the coordinator."""
         # Check if child entity mapping changed
         new_child_entity_id = self._get_child_entity_id()
+        _LOGGER.debug("Zone %d coordinator updated: current=%s, new=%s", 
+                     self.zone_id, self._current_child_entity_id, new_child_entity_id)
+        
         if new_child_entity_id != self._current_child_entity_id:
             old_child_entity_id = self._current_child_entity_id
             self._current_child_entity_id = new_child_entity_id
             self._update_child_entity_listener()
-            self._update_supported_features()
             
-            _LOGGER.debug("Zone %d child entity changed from %s to %s", 
+            _LOGGER.info("Zone %d child entity changed from %s to %s", 
                          self.zone_id, old_child_entity_id, new_child_entity_id)
-            
-            # Force immediate state update to refresh all media properties
+        
+        # Always update supported features in case child entity features changed
+        self._update_supported_features()
+        
+        # Force state update if child entity mapping changed
+        if new_child_entity_id != getattr(self, '_last_child_entity_id', None):
             self.async_write_ha_state()
+            self._last_child_entity_id = new_child_entity_id
         
         super()._async_coordinator_updated()
     
