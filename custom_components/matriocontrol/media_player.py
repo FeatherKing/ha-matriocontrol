@@ -67,8 +67,18 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
         self._base_features = base_features
         self._attr_supported_features = self._base_features
         
+        # Cache for efficient property access
+        self._cached_zone_state = None
+        self._cached_child_entity = None
+        self._cache_valid = False
+        
         # Initialize child entity tracking (but defer feature update until hass is available)
         self._current_child_entity_id = self._get_child_entity_id()
+    
+    def schedule_update_ha_state(self):
+        """Schedule an update and invalidate cache."""
+        self._cache_valid = False
+        super().schedule_update_ha_state()
 
     def _get_child_entity_id(self) -> str | None:
         """Get the current child entity ID based on selected input."""
@@ -116,21 +126,33 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
         
         # Look up mapped child entity
         return result
-    
+
+    def _refresh_cache(self):
+        """Refresh cached zone state and child entity data."""
+        # Get fresh zone state
+        zone_states = self.coordinator.data.get("zone_states", {})
+        self._cached_zone_state = zone_states.get(self.zone_id)
+        
+        # Get fresh child entity
+        if self.hass and self._current_child_entity_id:
+            self._cached_child_entity = self.hass.states.get(self._current_child_entity_id)
+        else:
+            self._cached_child_entity = None
+            
+        self._cache_valid = True
+
+    def _get_zone_state(self) -> dict | None:
+        """Get cached zone state, refreshing if needed."""
+        if not self._cache_valid:
+            self._refresh_cache()
+        return self._cached_zone_state
+
     def _get_child_entity(self):
-        """Get the child media player entity object."""
-        # Safety check - hass not available during initialization
-        if not self.hass:
-            return None
-            
-        # Use cached child entity ID to avoid timing issues during source changes
-        child_entity_id = self._current_child_entity_id
-        if not child_entity_id:
-            return None
-            
-        # Get state from hass.states
-        return self.hass.states.get(child_entity_id)
-    
+        """Get the cached child media player entity object."""
+        if not self._cache_valid:
+            self._refresh_cache()
+        return self._cached_child_entity
+
     def _update_supported_features(self):
         """Update supported features based on child entity capabilities."""
         child_entity = self._get_child_entity()
@@ -244,9 +266,7 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
         if not self.coordinator.data.get("connected", False):
             return MediaPlayerState.OFF
         
-        # Get zone state from HNG sync data
-        zone_states = self.coordinator.data.get("zone_states", {})
-        zone_state = zone_states.get(self.zone_id)
+        zone_state = self._get_zone_state()
         
         # If zone is off, return OFF regardless of child state
         if zone_state and zone_state.get("power") == "OFF":
@@ -429,38 +449,24 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
     @property
     def source(self) -> str | None:
         """Return the current input source."""
-        # Get zone state from HNG sync data
-        zone_states = self.coordinator.data.get("zone_states", {})
-        zone_state = zone_states.get(self.zone_id)
-        
-        _LOGGER.debug("Zone %d source check - zone_states: %s, zone_state: %s", 
-                     self.zone_id, zone_states, zone_state)
+        zone_state = self._get_zone_state()
         
         if zone_state and "input" in zone_state:
-            _LOGGER.debug("Zone %d returning input: %s", self.zone_id, zone_state["input"])
             return zone_state["input"]
         
-        _LOGGER.debug("Zone %d returning None for source", self.zone_id)
+        return None
         return None
 
     @property
     def volume_level(self) -> float | None:
         """Volume level of the media player (0..1)."""
-        # Get zone state from HNG sync data
-        zone_states = self.coordinator.data.get("zone_states", {})
-        zone_state = zone_states.get(self.zone_id)
-        
-        _LOGGER.debug("Zone %d volume check - zone_states: %s, zone_state: %s", 
-                     self.zone_id, zone_states, zone_state)
+        zone_state = self._get_zone_state()
         
         if zone_state and "volume" in zone_state:
             # Convert from 0..38 range to 0..1 range
             volume = zone_state["volume"]
-            volume_level = volume / VOLUME_MAX if VOLUME_MAX > 0 else 0.0
-            _LOGGER.debug("Zone %d returning volume: %s -> %s", self.zone_id, volume, volume_level)
-            return volume_level
+            return volume / VOLUME_MAX if VOLUME_MAX > 0 else 0.0
         
-        _LOGGER.debug("Zone %d returning None for volume", self.zone_id)
         return None
 
     @property
