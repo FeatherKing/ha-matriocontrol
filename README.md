@@ -75,7 +75,7 @@ Link device inputs to existing media player entities for streaming support. Add 
 matriocontrol:
   - host: 192.168.1.100
     port: 8899
-    input_mappings:
+    child_entity_mappings:
       input_1: media_player.kitchen_sonos      # Input 1 → Sonos player
       input_2: media_player.spotify_connect    # Input 2 → Spotify Connect
       input_5: media_player.living_room_tv     # Input 5 → TV (gaps allowed)

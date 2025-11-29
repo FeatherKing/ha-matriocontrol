@@ -82,8 +82,8 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
 
     def _get_child_entity_id(self) -> str | None:
         """Get the current child entity ID based on selected input."""
-        child_input_mappings = self.coordinator.data.get("child_input_mappings", {})
-        if not child_input_mappings:
+        child_entity_mappings = self.coordinator.data.get("child_entity_mappings", {})
+        if not child_entity_mappings:
             return None
         
         # Get current zone input
@@ -101,7 +101,7 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
         input_key = f"input_{current_input}"
         
         # Look up mapped child entity
-        return child_input_mappings.get(input_key)
+        return child_entity_mappings.get(input_key)
     
     def _get_child_entity(self):
         """Get the child media player entity object."""
