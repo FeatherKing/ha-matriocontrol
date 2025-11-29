@@ -72,7 +72,6 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
             | MediaPlayerEntityFeature.PREVIOUS_TRACK
             | MediaPlayerEntityFeature.NEXT_TRACK
             | MediaPlayerEntityFeature.SEEK
-            | MediaPlayerEntityFeature.BROWSE_MEDIA
             | MediaPlayerEntityFeature.GROUPING
         )
         
@@ -130,6 +129,9 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
     def _child_entity_changed(self, event):
         """Handle child entity state changes."""
         if event.data["entity_id"] == self._current_child_entity_id:
+            _LOGGER.debug("Zone %d child entity %s state changed", 
+                         self.zone_id, self._current_child_entity_id)
+            
             # Check if group membership changed
             old_state = event.data.get("old_state")
             new_state = event.data.get("new_state")
@@ -539,20 +541,14 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
         """Browse media via child entity."""
         child_entity_id = self._get_child_entity_id()
         if not child_entity_id:
+            # No child entity mapped - no browsing available
             return None
         
-        # Get the child entity
-        child_entity = self.hass.states.get(child_entity_id)
-        if not child_entity:
-            return None
-        
-        # Call browse_media on the child entity
-        child_media_player = self.hass.data.get("media_player", {}).get(child_entity_id)
-        if hasattr(child_media_player, "async_browse_media"):
-            return await child_media_player.async_browse_media(
-                media_content_type, media_content_id
-            )
-        
+        # For now, return None to disable browse functionality
+        # This is a complex delegation that requires accessing the actual child entity instance
+        # TODO: Implement proper browse media delegation
+        _LOGGER.debug("Browse media requested for zone %d with child %s - not yet implemented", 
+                     self.zone_id, child_entity_id)
         return None
     
     async def async_added_to_hass(self) -> None:
@@ -579,9 +575,16 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
         # Check if child entity mapping changed
         new_child_entity_id = self._get_child_entity_id()
         if new_child_entity_id != self._current_child_entity_id:
+            old_child_entity_id = self._current_child_entity_id
             self._current_child_entity_id = new_child_entity_id
             self._update_child_entity_listener()
             self._update_supported_features()
+            
+            _LOGGER.debug("Zone %d child entity changed from %s to %s", 
+                         self.zone_id, old_child_entity_id, new_child_entity_id)
+            
+            # Force immediate state update to refresh all media properties
+            self.async_write_ha_state()
         
         super()._async_coordinator_updated()
     
