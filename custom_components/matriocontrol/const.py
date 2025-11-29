@@ -7,7 +7,7 @@ CONF_HOST = "IP Address"
 CONF_PORT = "Port"
 CONF_DEVICE_NAME = "Device Name"
 CONF_ZONES = "Number of Zones"
-CONF_SOURCE_MAPPINGS = "source_mappings"
+CONF_INPUT_MAPPINGS = "input_mappings"
 
 # Default values
 DEFAULT_PORT = 8899

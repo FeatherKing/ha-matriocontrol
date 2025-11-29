@@ -9,7 +9,7 @@ from homeassistant.const import Platform, CONF_HOST, CONF_PORT
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
 
-from .const import DOMAIN, DEFAULT_PORT, CONF_SOURCE_MAPPINGS
+from .const import DOMAIN, DEFAULT_PORT, CONF_INPUT_MAPPINGS
 from .coordinator import MatrioControlDataUpdateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -30,8 +30,8 @@ CONFIG_SCHEMA = vol.Schema(
                     {
                         vol.Required(CONF_HOST): cv.string,
                         vol.Optional(CONF_PORT, default=DEFAULT_PORT): cv.port,
-                        vol.Optional(CONF_SOURCE_MAPPINGS, default={}): vol.Schema(
-                            {cv.positive_int: cv.entity_id}
+                        vol.Optional(CONF_INPUT_MAPPINGS, default={}): vol.Schema(
+                            {cv.string: cv.entity_id}
                         ),
                     }
                 )
@@ -52,9 +52,9 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         hass.data.setdefault(DOMAIN, {})
         device_key = f"{device_config[CONF_HOST]}:{device_config.get(CONF_PORT, DEFAULT_PORT)}"
         hass.data[DOMAIN][f"yaml_{device_key}"] = {
-            CONF_SOURCE_MAPPINGS: device_config.get(CONF_SOURCE_MAPPINGS, {})
+            CONF_INPUT_MAPPINGS: device_config.get(CONF_INPUT_MAPPINGS, {})
         }
-        _LOGGER.debug("Stored YAML source mappings for %s: %s", device_key, device_config.get(CONF_SOURCE_MAPPINGS, {}))
+        _LOGGER.debug("Stored YAML input mappings for %s: %s", device_key, device_config.get(CONF_INPUT_MAPPINGS, {}))
 
     return True
 

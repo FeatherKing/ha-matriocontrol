@@ -23,8 +23,8 @@ Home Assistant integration for Dayton Audio multi-zone amplifiers using the Matr
 - **Real-time Updates**: Live status monitoring and control
 - **Connection Monitoring**: Automatic reconnection on device issues
 
-### **Media Player Source Mapping**
-- **Source Mapping**: Link zone inputs to existing media player entities for streaming
+### **Media Player Input Mapping**
+- **Input Mapping**: Link device inputs to existing media player entities for streaming
 - **Media Delegation**: Play/pause, track info, and browsing delegated to child entities
 - **Group Synchronization**: Automatic media player group management
 - **Smart Fallback**: Unmapped inputs work as basic receivers
@@ -67,27 +67,28 @@ Home Assistant integration for Dayton Audio multi-zone amplifiers using the Matr
 
 ### Advanced Configuration (Optional)
 
-#### Media Player Source Mapping
+#### Media Player Input Mapping
 
-Link zone inputs to existing media player entities for streaming support. Add to your `configuration.yaml`:
+Link device inputs to existing media player entities for streaming support. Add to your `configuration.yaml`:
 
 ```yaml
 matriocontrol:
   - host: 192.168.1.100
     port: 8899
-    source_mappings:
-      1: media_player.kitchen_sonos      # Input 1 → Sonos player
-      2: media_player.spotify_connect    # Input 2 → Spotify Connect
-      5: media_player.living_room_tv     # Input 5 → TV (gaps allowed)
-      # Inputs 3,4,6,7,8 remain as basic receivers
+    input_mappings:
+      input_1: media_player.kitchen_sonos      # Input 1 → Sonos player
+      input_2: media_player.spotify_connect    # Input 2 → Spotify Connect
+      input_5: media_player.living_room_tv     # Input 5 → TV (gaps allowed)
+      # Inputs 3,4,6,7 remain as basic receivers
 ```
 
 **How it works:**
-- **Enhanced Control**: Mapped zones gain play/pause, track info, and media browsing
-- **Volume Control**: Zone volume/mute always controlled by amplifier hardware
-- **Dynamic Mapping**: Changing zone source automatically updates child entity link
-- **Group Management**: Zone groups automatically sync with child entity groups
-- **Fallback Mode**: Unmapped inputs continue working as basic receivers
+- **Zone Mirroring**: When a zone selects a mapped input, the zone entity mirrors that input's media player
+- **Enhanced Control**: Mapped zones gain play/pause, track info, and media browsing from the input
+- **Volume Control**: Zone volume/mute always controlled by amplifier hardware  
+- **Dynamic Switching**: Zones automatically mirror different inputs as you change sources
+- **Group Management**: Zone groups automatically sync with their mapped input's groups
+- **Fallback Mode**: Zones using unmapped inputs continue working as basic receivers
 
 ### Supported Devices
 - **Dayton Audio DAX88**

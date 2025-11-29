@@ -9,7 +9,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .const import DOMAIN, CONF_SOURCE_MAPPINGS
+from .const import DOMAIN, CONF_INPUT_MAPPINGS
 from .matrio_controller import MatrioController
 
 _LOGGER = logging.getLogger(__name__)
@@ -29,13 +29,13 @@ class MatrioControlDataUpdateCoordinator(DataUpdateCoordinator):
         )
         self._entities = []  # Track entities for direct updates
         
-        # Get source mappings from YAML configuration
-        self.source_mappings = {}
+        # Get input mappings from YAML configuration
+        self.input_mappings = {}
         device_key = f"{entry.data['host']}:{entry.data['port']}"
         yaml_config = hass.data.get(DOMAIN, {}).get(f"yaml_{device_key}", {})
         if yaml_config:
-            self.source_mappings = yaml_config.get(CONF_SOURCE_MAPPINGS, {})
-            _LOGGER.debug("Loaded source mappings from YAML: %s", self.source_mappings)
+            self.input_mappings = yaml_config.get(CONF_INPUT_MAPPINGS, {})
+            _LOGGER.debug("Loaded input mappings from YAML: %s", self.input_mappings)
         
         super().__init__(
             hass,
@@ -126,7 +126,7 @@ class MatrioControlDataUpdateCoordinator(DataUpdateCoordinator):
                 "input_mappings": input_mappings,
                 "zone_names": zone_names,
                 "zone_states": zone_states,
-                "source_mappings": self.source_mappings,
+                "child_input_mappings": self.input_mappings,
             }
             _LOGGER.debug("Coordinator update successful, returning data with %d zone states", len(zone_states))
             _LOGGER.debug("Zone states data: %s", zone_states)
@@ -143,7 +143,7 @@ class MatrioControlDataUpdateCoordinator(DataUpdateCoordinator):
                 "names": {},
                 "last_heartbeat": None,
                 "zone_states": {},
-                "source_mappings": self.source_mappings,
+                "child_input_mappings": self.input_mappings,
             }
     
     def register_entity(self, entity):
