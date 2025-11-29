@@ -67,9 +67,8 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
         self._base_features = base_features
         self._attr_supported_features = self._base_features
         
-        # Initialize child entity tracking
+        # Initialize child entity tracking (but defer feature update until hass is available)
         self._current_child_entity_id = self._get_child_entity_id()
-        self._update_supported_features()
 
     def _get_child_entity_id(self) -> str | None:
         """Get the current child entity ID based on selected input."""
@@ -110,6 +109,10 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
     
     def _get_child_entity(self):
         """Get the child media player entity object."""
+        # Safety check - hass not available during initialization
+        if not self.hass:
+            return None
+            
         # Use cached child entity ID to avoid timing issues during source changes
         child_entity_id = self._current_child_entity_id
         if not child_entity_id:
