@@ -32,10 +32,17 @@ class MatrioControlDataUpdateCoordinator(DataUpdateCoordinator):
         # Get child entity mappings from YAML configuration
         self.child_entity_mappings = {}
         device_key = f"{entry.data['host']}:{entry.data['port']}"
+        _LOGGER.debug("Looking for YAML config with device_key: %s", device_key)
+        _LOGGER.debug("Available hass.data[DOMAIN]: %s", hass.data.get(DOMAIN, {}))
+        
         yaml_config = hass.data.get(DOMAIN, {}).get(f"yaml_{device_key}", {})
+        _LOGGER.debug("Found yaml_config: %s", yaml_config)
+        
         if yaml_config:
             self.child_entity_mappings = yaml_config.get(CONF_CHILD_ENTITY_MAPPINGS, {})
-            _LOGGER.debug("Loaded child entity mappings from YAML: %s", self.child_entity_mappings)
+            _LOGGER.info("Loaded child entity mappings from YAML: %s", self.child_entity_mappings)
+        else:
+            _LOGGER.warning("No YAML configuration found for device %s", device_key)
         
         super().__init__(
             hass,

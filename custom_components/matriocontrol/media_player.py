@@ -70,25 +70,39 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
     def _get_child_entity_id(self) -> str | None:
         """Get the current child entity ID based on selected input."""
         child_entity_mappings = self.coordinator.data.get("child_entity_mappings", {})
+        _LOGGER.debug("Zone %d _get_child_entity_id: child_entity_mappings=%s", 
+                     self.zone_id, child_entity_mappings)
+        
         if not child_entity_mappings:
+            _LOGGER.debug("Zone %d no child_entity_mappings found", self.zone_id)
             return None
         
         # Get current zone input
         zone_states = self.coordinator.data.get("zone_states", {})
         zone_state = zone_states.get(self.zone_id)
+        _LOGGER.debug("Zone %d zone_state=%s", self.zone_id, zone_state)
+        
         if not zone_state:
+            _LOGGER.debug("Zone %d no zone_state found", self.zone_id)
             return None
             
         # Get input number from zone state
         current_input = zone_state.get("input_number")
+        _LOGGER.debug("Zone %d current_input=%s", self.zone_id, current_input)
+        
         if current_input is None:
+            _LOGGER.debug("Zone %d no current_input found", self.zone_id)
             return None
         
         # Convert to input_N format to match configuration
         input_key = f"input_{current_input}"
+        result = child_entity_mappings.get(input_key)
+        
+        _LOGGER.debug("Zone %d input_key=%s -> child_entity=%s", 
+                     self.zone_id, input_key, result)
         
         # Look up mapped child entity
-        return child_entity_mappings.get(input_key)
+        return result
     
     def _get_child_entity(self):
         """Get the child media player entity object."""
