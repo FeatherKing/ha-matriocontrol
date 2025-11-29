@@ -104,14 +104,9 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
     
     def _get_child_entity(self):
         """Get the child media player entity object."""
-        child_entity_id = self._get_child_entity_id()
+        # Use cached child entity ID to avoid timing issues during source changes
+        child_entity_id = self._current_child_entity_id
         if not child_entity_id:
-            return None
-        
-        # Get entity from registry
-        entity_registry = er.async_get(self.hass)
-        entity = entity_registry.async_get(child_entity_id)
-        if not entity:
             return None
             
         # Get state from hass.states
@@ -277,7 +272,12 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
         """Return the title of current playing media."""
         child_entity = self._get_child_entity()
         if child_entity:
-            return child_entity.attributes.get("media_title")
+            title = child_entity.attributes.get("media_title")
+            _LOGGER.debug("Zone %d media_title: %s (child: %s)", 
+                         self.zone_id, title, self._current_child_entity_id)
+            return title
+        _LOGGER.debug("Zone %d media_title: None (no child: %s)", 
+                     self.zone_id, self._current_child_entity_id)
         return None
     
     @property
