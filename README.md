@@ -23,6 +23,12 @@ Home Assistant integration for Dayton Audio multi-zone amplifiers using the Matr
 - **Real-time Updates**: Live status monitoring and control
 - **Connection Monitoring**: Automatic reconnection on device issues
 
+### **Media Player Source Mapping**
+- **Source Mapping**: Link zone inputs to existing media player entities for streaming
+- **Media Delegation**: Play/pause, track info, and browsing delegated to child entities
+- **Group Synchronization**: Automatic media player group management
+- **Smart Fallback**: Unmapped inputs work as basic receivers
+
 ### **Rich Home Assistant Entities**
 - **Media Players**: Media player entities for each zone (with Power, Volume, Mute, Source select)
 - **Number Controls**: Balance, Bass, Treble per zone
@@ -58,6 +64,30 @@ Home Assistant integration for Dayton Audio multi-zone amplifiers using the Matr
 4. Enter your device IP address and port (default: 8899)
 5. Give your device a name (this name is only used in Home Assistant)
     1. Zone and Input names will be gathered from the device
+
+### Advanced Configuration (Optional)
+
+#### Media Player Source Mapping
+
+Link zone inputs to existing media player entities for streaming support. Add to your `configuration.yaml`:
+
+```yaml
+matriocontrol:
+  - host: 192.168.1.100
+    port: 8899
+    source_mappings:
+      1: media_player.kitchen_sonos      # Input 1 → Sonos player
+      2: media_player.spotify_connect    # Input 2 → Spotify Connect
+      5: media_player.living_room_tv     # Input 5 → TV (gaps allowed)
+      # Inputs 3,4,6,7,8 remain as basic receivers
+```
+
+**How it works:**
+- **Enhanced Control**: Mapped zones gain play/pause, track info, and media browsing
+- **Volume Control**: Zone volume/mute always controlled by amplifier hardware
+- **Dynamic Mapping**: Changing zone source automatically updates child entity link
+- **Group Management**: Zone groups automatically sync with child entity groups
+- **Fallback Mode**: Unmapped inputs continue working as basic receivers
 
 ### Supported Devices
 - **Dayton Audio DAX88**
