@@ -104,6 +104,16 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
         _LOGGER.debug("Zone %d input_key=%s -> child_entity=%s", 
                      self.zone_id, input_key, result)
         
+        # Update cached child entity ID if it changed
+        if result != self._current_child_entity_id:
+            old_child = self._current_child_entity_id
+            self._current_child_entity_id = result
+            _LOGGER.debug("Zone %d child entity changed: %s -> %s", 
+                         self.zone_id, old_child, result)
+            
+            # Update supported features when child entity changes
+            self._update_supported_features()
+        
         # Look up mapped child entity
         return result
     
@@ -322,6 +332,7 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
     @property
     def media_title(self) -> str | None:
         """Return the title of current playing media."""
+        _LOGGER.debug("Zone %d media_title property accessed", self.zone_id)
         child_entity = self._get_child_entity()
         if child_entity:
             title = child_entity.attributes.get("media_title")
