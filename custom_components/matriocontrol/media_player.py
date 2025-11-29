@@ -66,6 +66,10 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
         
         self._base_features = base_features
         self._attr_supported_features = self._base_features
+        
+        # Initialize child entity tracking
+        self._current_child_entity_id = self._get_child_entity_id()
+        self._update_supported_features()
 
     def _get_child_entity_id(self) -> str | None:
         """Get the current child entity ID based on selected input."""
