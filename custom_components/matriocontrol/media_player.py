@@ -8,10 +8,14 @@ from homeassistant.components.media_player import (
     MediaPlayerEntity,
     MediaPlayerEntityFeature,
     MediaPlayerState,
+    MediaPlayerDeviceClass,
+    MediaType,
+    BrowseMedia,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers import entity_registry as er
 
 from .const import DOMAIN, INPUTS, ZONES, VOLUME_MAX
 from .coordinator import MatrioControlDataUpdateCoordinator
@@ -47,7 +51,11 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
         """Initialize the media player."""
         super().__init__(coordinator, zone_id)
         self._attr_unique_id = f"{coordinator.entry.entry_id}_zone_{zone_id}"
-        self._attr_supported_features = (
+        self._attr_device_class = MediaPlayerDeviceClass.RECEIVER
+        self._current_child_entity_id = None
+        
+        # Base receiver features always available
+        base_features = (
             MediaPlayerEntityFeature.VOLUME_SET
             | MediaPlayerEntityFeature.VOLUME_MUTE
             | MediaPlayerEntityFeature.VOLUME_STEP
@@ -55,6 +63,109 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
             | MediaPlayerEntityFeature.TURN_OFF
             | MediaPlayerEntityFeature.SELECT_SOURCE
         )
+        
+        # Enhanced features available when child entity is mapped
+        enhanced_features = (
+            MediaPlayerEntityFeature.PLAY
+            | MediaPlayerEntityFeature.PAUSE
+            | MediaPlayerEntityFeature.STOP
+            | MediaPlayerEntityFeature.PREVIOUS_TRACK
+            | MediaPlayerEntityFeature.NEXT_TRACK
+            | MediaPlayerEntityFeature.SEEK
+            | MediaPlayerEntityFeature.BROWSE_MEDIA
+            | MediaPlayerEntityFeature.GROUPING
+        )
+        
+        self._base_features = base_features
+        self._enhanced_features = enhanced_features
+        self._attr_supported_features = self._base_features
+
+    def _get_child_entity_id(self) -> str | None:
+        """Get the current child entity ID based on selected source."""
+        source_mappings = self.coordinator.data.get("source_mappings", {})
+        if not source_mappings:
+            return None
+        
+        # Get current zone input
+        zone_states = self.coordinator.data.get("zone_states", {})
+        zone_state = zone_states.get(self.zone_id)
+        if not zone_state:
+            return None
+            
+        # Get input number from zone state
+        current_input = zone_state.get("input_number")
+        if current_input is None:
+            return None
+        
+        # Look up mapped child entity
+        return source_mappings.get(current_input)
+    
+    def _get_child_entity(self):
+        """Get the child media player entity object."""
+        child_entity_id = self._get_child_entity_id()
+        if not child_entity_id:
+            return None
+        
+        # Get entity from registry
+        entity_registry = er.async_get(self.hass)
+        entity = entity_registry.async_get(child_entity_id)
+        if not entity:
+            return None
+            
+        # Get state from hass.states
+        return self.hass.states.get(child_entity_id)
+    
+    def _update_supported_features(self):
+        """Update supported features based on whether child entity is available."""
+        child_entity = self._get_child_entity()
+        if child_entity and child_entity.state != "unavailable":
+            self._attr_supported_features = self._base_features | self._enhanced_features
+        else:
+            self._attr_supported_features = self._base_features
+    
+    @callback
+    def _child_entity_changed(self, event):
+        """Handle child entity state changes."""
+        if event.data["entity_id"] == self._current_child_entity_id:
+            # Check if group membership changed
+            old_state = event.data.get("old_state")
+            new_state = event.data.get("new_state")
+            
+            if old_state and new_state:
+                old_group = old_state.attributes.get("group_members", [])
+                new_group = new_state.attributes.get("group_members", [])
+                
+                if old_group != new_group:
+                    # Child entity group changed - update our zone group accordingly
+                    self.hass.async_create_task(self._sync_with_child_group())
+            
+            self.async_write_ha_state()
+    
+    async def _sync_with_child_group(self):
+        """Synchronize zone group with child entity group."""
+        child_entity = self._get_child_entity()
+        if not child_entity:
+            return
+        
+        child_group_members = child_entity.attributes.get("group_members", [])
+        
+        # Find all zones that should be in the same group (using same child entities)
+        target_zone_members = []
+        for entity in self.coordinator._entities:
+            if (hasattr(entity, '_get_child_entity_id') and 
+                hasattr(entity, 'entity_id') and
+                entity._get_child_entity_id() in child_group_members):
+                target_zone_members.append(entity.entity_id)
+        
+        # Join zones together if we have multiple
+        if len(target_zone_members) > 1 and self.entity_id in target_zone_members:
+            # Use Home Assistant's native grouping for zones
+            await self.hass.services.async_call(
+                "media_player", "join", {
+                    "entity_id": self.entity_id,
+                    "group_members": target_zone_members
+                }
+            )
 
     @property
     def name(self) -> str:
@@ -75,13 +186,166 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
         zone_states = self.coordinator.data.get("zone_states", {})
         zone_state = zone_states.get(self.zone_id)
         
-        if zone_state and zone_state.get("power") == "ON":
-            return MediaPlayerState.ON
-        elif zone_state and zone_state.get("power") == "OFF":
+        # If zone is off, return OFF regardless of child state
+        if zone_state and zone_state.get("power") == "OFF":
             return MediaPlayerState.OFF
+        elif not zone_state or zone_state.get("power") != "ON":
+            return MediaPlayerState.OFF
+            
+        # Zone is ON - check if we have child entity for enhanced state
+        child_entity = self._get_child_entity()
+        if child_entity and child_entity.state != "unavailable":
+            # Delegate state to child entity when available
+            child_state = child_entity.state
+            if child_state == "playing":
+                return MediaPlayerState.PLAYING
+            elif child_state == "paused":
+                return MediaPlayerState.PAUSED
+            elif child_state == "idle":
+                return MediaPlayerState.IDLE
+            elif child_state == "off":
+                return MediaPlayerState.ON  # Zone is on, but child is off
+            else:
+                return MediaPlayerState.ON
         else:
-            # Fallback to connected state if no zone state available
-            return MediaPlayerState.ON if self.coordinator.data.get("connected", False) else MediaPlayerState.OFF
+            # No child entity - basic receiver mode
+            return MediaPlayerState.ON
+
+    @property
+    def media_content_id(self) -> str | None:
+        """Return the content ID of current playing media."""
+        child_entity = self._get_child_entity()
+        if child_entity:
+            return child_entity.attributes.get("media_content_id")
+        return None
+    
+    @property
+    def media_content_type(self) -> str | None:
+        """Return the content type of current playing media."""
+        child_entity = self._get_child_entity()
+        if child_entity:
+            return child_entity.attributes.get("media_content_type")
+        return None
+    
+    @property
+    def media_duration(self) -> int | None:
+        """Return the duration of current playing media in seconds."""
+        child_entity = self._get_child_entity()
+        if child_entity:
+            return child_entity.attributes.get("media_duration")
+        return None
+    
+    @property
+    def media_position(self) -> int | None:
+        """Return the position of current playing media in seconds."""
+        child_entity = self._get_child_entity()
+        if child_entity:
+            return child_entity.attributes.get("media_position")
+        return None
+    
+    @property
+    def media_position_updated_at(self):
+        """Return the time media position was last updated."""
+        child_entity = self._get_child_entity()
+        if child_entity:
+            return child_entity.attributes.get("media_position_updated_at")
+        return None
+    
+    @property
+    def media_image_url(self) -> str | None:
+        """Return the image URL of current playing media."""
+        child_entity = self._get_child_entity()
+        if child_entity:
+            return child_entity.attributes.get("entity_picture")
+        return None
+    
+    @property
+    def media_image_remotely_accessible(self) -> bool:
+        """Return if the image is remotely accessible."""
+        child_entity = self._get_child_entity()
+        if child_entity:
+            return child_entity.attributes.get("media_image_remotely_accessible", False)
+        return False
+    
+    @property
+    def media_title(self) -> str | None:
+        """Return the title of current playing media."""
+        child_entity = self._get_child_entity()
+        if child_entity:
+            return child_entity.attributes.get("media_title")
+        return None
+    
+    @property
+    def media_artist(self) -> str | None:
+        """Return the artist of current playing media."""
+        child_entity = self._get_child_entity()
+        if child_entity:
+            return child_entity.attributes.get("media_artist")
+        return None
+    
+    @property
+    def media_album_name(self) -> str | None:
+        """Return the album name of current playing media."""
+        child_entity = self._get_child_entity()
+        if child_entity:
+            return child_entity.attributes.get("media_album_name")
+        return None
+    
+    @property
+    def media_album_artist(self) -> str | None:
+        """Return the album artist of current playing media."""
+        child_entity = self._get_child_entity()
+        if child_entity:
+            return child_entity.attributes.get("media_album_artist")
+        return None
+    
+    @property
+    def media_track(self) -> int | None:
+        """Return the track number of current playing media."""
+        child_entity = self._get_child_entity()
+        if child_entity:
+            return child_entity.attributes.get("media_track")
+        return None
+    
+    @property
+    def media_series_title(self) -> str | None:
+        """Return the series title of current playing media."""
+        child_entity = self._get_child_entity()
+        if child_entity:
+            return child_entity.attributes.get("media_series_title")
+        return None
+    
+    @property
+    def media_season(self) -> str | None:
+        """Return the season of current playing media."""
+        child_entity = self._get_child_entity()
+        if child_entity:
+            return child_entity.attributes.get("media_season")
+        return None
+    
+    @property
+    def media_episode(self) -> str | None:
+        """Return the episode of current playing media."""
+        child_entity = self._get_child_entity()
+        if child_entity:
+            return child_entity.attributes.get("media_episode")
+        return None
+    
+    @property
+    def media_channel(self) -> str | None:
+        """Return the channel of current playing media."""
+        child_entity = self._get_child_entity()
+        if child_entity:
+            return child_entity.attributes.get("media_channel")
+        return None
+    
+    @property
+    def media_playlist(self) -> str | None:
+        """Return the playlist of current playing media."""
+        child_entity = self._get_child_entity()
+        if child_entity:
+            return child_entity.attributes.get("media_playlist")
+        return None
 
     @property
     def source_list(self) -> list[str]:
@@ -199,3 +463,210 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
             _LOGGER.debug("async_select_source completed for zone %s", self.zone_id)
         else:
             _LOGGER.debug("No input_id found for source '%s'", source)
+
+    async def async_media_play(self) -> None:
+        """Send play command to child entity."""
+        child_entity_id = self._get_child_entity_id()
+        if child_entity_id:
+            await self.hass.services.async_call(
+                "media_player", "media_play", {"entity_id": child_entity_id}
+            )
+    
+    async def async_media_pause(self) -> None:
+        """Send pause command to child entity."""
+        child_entity_id = self._get_child_entity_id()
+        if child_entity_id:
+            await self.hass.services.async_call(
+                "media_player", "media_pause", {"entity_id": child_entity_id}
+            )
+    
+    async def async_media_stop(self) -> None:
+        """Send stop command to child entity."""
+        child_entity_id = self._get_child_entity_id()
+        if child_entity_id:
+            await self.hass.services.async_call(
+                "media_player", "media_stop", {"entity_id": child_entity_id}
+            )
+    
+    async def async_media_previous_track(self) -> None:
+        """Send previous track command to child entity."""
+        child_entity_id = self._get_child_entity_id()
+        if child_entity_id:
+            await self.hass.services.async_call(
+                "media_player", "media_previous_track", {"entity_id": child_entity_id}
+            )
+    
+    async def async_media_next_track(self) -> None:
+        """Send next track command to child entity."""
+        child_entity_id = self._get_child_entity_id()
+        if child_entity_id:
+            await self.hass.services.async_call(
+                "media_player", "media_next_track", {"entity_id": child_entity_id}
+            )
+    
+    async def async_media_seek(self, position: float) -> None:
+        """Send seek command to child entity."""
+        child_entity_id = self._get_child_entity_id()
+        if child_entity_id:
+            await self.hass.services.async_call(
+                "media_player", "media_seek", {
+                    "entity_id": child_entity_id,
+                    "seek_position": position
+                }
+            )
+    
+    async def async_play_media(
+        self, media_type: MediaType | str, media_id: str, **kwargs: Any
+    ) -> None:
+        """Play a piece of media via child entity."""
+        child_entity_id = self._get_child_entity_id()
+        if child_entity_id:
+            await self.hass.services.async_call(
+                "media_player", "play_media", {
+                    "entity_id": child_entity_id,
+                    "media_content_type": media_type,
+                    "media_content_id": media_id,
+                    **kwargs
+                }
+            )
+    
+    async def async_browse_media(
+        self, media_content_type: str | None = None, media_content_id: str | None = None
+    ) -> BrowseMedia | None:
+        """Browse media via child entity."""
+        child_entity_id = self._get_child_entity_id()
+        if not child_entity_id:
+            return None
+        
+        # Get the child entity
+        child_entity = self.hass.states.get(child_entity_id)
+        if not child_entity:
+            return None
+        
+        # Call browse_media on the child entity
+        child_media_player = self.hass.data.get("media_player", {}).get(child_entity_id)
+        if hasattr(child_media_player, "async_browse_media"):
+            return await child_media_player.async_browse_media(
+                media_content_type, media_content_id
+            )
+        
+        return None
+    
+    async def async_added_to_hass(self) -> None:
+        """Called when entity is added to hass."""
+        await super().async_added_to_hass()
+        
+        # Set up listener for child entity changes
+        self._update_child_entity_listener()
+        
+        # Update supported features based on current child entity
+        self._update_supported_features()
+    
+    async def async_will_remove_from_hass(self) -> None:
+        """Called when entity will be removed from hass."""
+        # Clean up child entity listener
+        if hasattr(self, "_child_entity_listener") and self._child_entity_listener:
+            self._child_entity_listener()
+        
+        await super().async_will_remove_from_hass()
+    
+    @callback
+    def _async_coordinator_updated(self) -> None:
+        """Handle updated data from the coordinator."""
+        # Check if child entity mapping changed
+        new_child_entity_id = self._get_child_entity_id()
+        if new_child_entity_id != self._current_child_entity_id:
+            self._current_child_entity_id = new_child_entity_id
+            self._update_child_entity_listener()
+            self._update_supported_features()
+        
+        super()._async_coordinator_updated()
+    
+    def _update_child_entity_listener(self):
+        """Update the listener for child entity state changes."""
+        # Remove existing listener
+        if hasattr(self, "_child_entity_listener") and self._child_entity_listener:
+            self._child_entity_listener()
+            self._child_entity_listener = None
+        
+        # Add new listener if we have a child entity
+        if self._current_child_entity_id:
+            self._child_entity_listener = self.hass.bus.async_listen(
+                "state_changed", self._child_entity_changed
+            )
+    
+    async def async_join_players(self, group_members: list[str]) -> None:
+        """Join players together in a group."""
+        child_entity_id = self._get_child_entity_id()
+        if not child_entity_id:
+            return
+        
+        # Get child entities for all zones in the group
+        child_entities = set()
+        for member in group_members:
+            # Find zone for this member
+            if member == self.entity_id:
+                child_entities.add(child_entity_id)
+            else:
+                # Find other zone entities in our coordinator 
+                for entity in self.coordinator._entities:
+                    if hasattr(entity, 'entity_id') and entity.entity_id == member:
+                        member_child = entity._get_child_entity_id()
+                        if member_child:
+                            child_entities.add(member_child)
+        
+        # Join child entities if we have any
+        child_entities = list(child_entities)
+        if len(child_entities) > 1:
+            await self.hass.services.async_call(
+                "media_player", "join", {
+                    "entity_id": child_entities[0],
+                    "group_members": child_entities
+                }
+            )
+        elif child_entity_id:
+            # Single child - ensure it's grouped with itself
+            await self.hass.services.async_call(
+                "media_player", "join", {
+                    "entity_id": child_entity_id,
+                    "group_members": [child_entity_id]
+                }
+            )
+    
+    async def async_unjoin_player(self) -> None:
+        """Remove this player from any group."""
+        child_entity_id = self._get_child_entity_id()
+        if child_entity_id:
+            # Check if other zones are still using this child entity
+            other_zones_using_child = []
+            for entity in self.coordinator._entities:
+                if (hasattr(entity, '_get_child_entity_id') and 
+                    entity != self and 
+                    entity._get_child_entity_id() == child_entity_id):
+                    other_zones_using_child.append(entity.entity_id)
+            
+            # Only unjoin the child if no other zones are using it
+            if not other_zones_using_child:
+                await self.hass.services.async_call(
+                    "media_player", "unjoin", {"entity_id": child_entity_id}
+                )
+    
+    @property
+    def group_members(self) -> list[str] | None:
+        """Return the group members if this entity is in a group."""
+        child_entity = self._get_child_entity()
+        if not child_entity:
+            return None
+        
+        child_group_members = child_entity.attributes.get("group_members", [])
+        if not child_group_members:
+            return None
+        
+        # Map child group members back to zone entities
+        zone_members = []
+        for entity in self.coordinator._entities:
+            if (hasattr(entity, '_get_child_entity_id') and 
+                entity._get_child_entity_id() in child_group_members):
+                zone_members.append(entity.entity_id)
+        
+        return zone_members if zone_members else None

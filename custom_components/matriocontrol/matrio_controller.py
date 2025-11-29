@@ -116,6 +116,7 @@ class UniversalHNGSyncDecoder:
             'zone_id': zone + 1,
             'power': power,
             'input': input_name,
+            'input_number': input_val,
             'volume': volume,
             'balance': balance,
             'mute': mute,
