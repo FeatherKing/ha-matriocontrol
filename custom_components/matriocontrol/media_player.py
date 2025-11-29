@@ -624,6 +624,8 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
     @callback
     def _async_coordinator_updated(self) -> None:
         """Handle updated data from the coordinator."""
+        _LOGGER.debug("Zone %d _async_coordinator_updated called", self.zone_id)
+        
         # Check if child entity mapping changed
         new_child_entity_id = self._get_child_entity_id()
         _LOGGER.debug("Zone %d coordinator updated: current=%s, new=%s", 
@@ -636,12 +638,17 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
             
             _LOGGER.info("Zone %d child entity changed from %s to %s", 
                          self.zone_id, old_child_entity_id, new_child_entity_id)
+            
+            # Force immediate state update when child entity changes
+            self.async_write_ha_state()
         
         # Always update supported features in case child entity features changed
         self._update_supported_features()
         
         # Force state update if child entity mapping changed
         if new_child_entity_id != getattr(self, '_last_child_entity_id', None):
+            _LOGGER.debug("Zone %d forcing state update: last=%s, new=%s", 
+                         self.zone_id, getattr(self, '_last_child_entity_id', None), new_child_entity_id)
             self.async_write_ha_state()
             self._last_child_entity_id = new_child_entity_id
         
