@@ -64,19 +64,7 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
             | MediaPlayerEntityFeature.SELECT_SOURCE
         )
         
-        # Enhanced features available when child entity is mapped
-        enhanced_features = (
-            MediaPlayerEntityFeature.PLAY
-            | MediaPlayerEntityFeature.PAUSE
-            | MediaPlayerEntityFeature.STOP
-            | MediaPlayerEntityFeature.PREVIOUS_TRACK
-            | MediaPlayerEntityFeature.NEXT_TRACK
-            | MediaPlayerEntityFeature.SEEK
-            | MediaPlayerEntityFeature.GROUPING
-        )
-        
         self._base_features = base_features
-        self._enhanced_features = enhanced_features
         self._attr_supported_features = self._base_features
 
     def _get_child_entity_id(self) -> str | None:
@@ -113,10 +101,35 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
         return self.hass.states.get(child_entity_id)
     
     def _update_supported_features(self):
-        """Update supported features based on whether child entity is available."""
+        """Update supported features based on child entity capabilities."""
         child_entity = self._get_child_entity()
         if child_entity and child_entity.state != "unavailable":
-            self._attr_supported_features = self._base_features | self._enhanced_features
+            # Get child entity's actual supported features
+            child_features = child_entity.attributes.get("supported_features", 0)
+            
+            # Combine base receiver features with child's media playback features
+            # Filter child features to only include ones that make sense to pass through
+            allowed_child_features = (
+                MediaPlayerEntityFeature.PLAY |
+                MediaPlayerEntityFeature.PAUSE |
+                MediaPlayerEntityFeature.STOP |
+                MediaPlayerEntityFeature.PREVIOUS_TRACK |
+                MediaPlayerEntityFeature.NEXT_TRACK |
+                MediaPlayerEntityFeature.SEEK |
+                MediaPlayerEntityFeature.REPEAT_SET |
+                MediaPlayerEntityFeature.SHUFFLE_SET |
+                MediaPlayerEntityFeature.CLEAR_PLAYLIST |
+                MediaPlayerEntityFeature.PLAY_MEDIA |
+                MediaPlayerEntityFeature.GROUPING
+            )
+            
+            # Only pass through features the child actually supports
+            passthrough_features = child_features & allowed_child_features
+            self._attr_supported_features = self._base_features | passthrough_features
+            
+            _LOGGER.debug("Zone %d features: base=0x%x, child=0x%x, allowed=0x%x, final=0x%x", 
+                         self.zone_id, self._base_features, child_features, 
+                         passthrough_features, self._attr_supported_features)
         else:
             self._attr_supported_features = self._base_features
     
@@ -134,10 +147,18 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
             if old_state and new_state:
                 old_group = old_state.attributes.get("group_members", [])
                 new_group = new_state.attributes.get("group_members", [])
+                old_features = old_state.attributes.get("supported_features", 0)
+                new_features = new_state.attributes.get("supported_features", 0)
+                old_available = old_state.state != "unavailable"
+                new_available = new_state.state != "unavailable"
                 
                 if old_group != new_group:
                     # Child entity group changed - update our zone group accordingly
                     self.hass.async_create_task(self._sync_with_child_group())
+                    
+                if old_features != new_features or old_available != new_available:
+                    # Child entity supported features changed or availability changed - update our features
+                    self._update_supported_features()
             
             self.async_write_ha_state()
     
