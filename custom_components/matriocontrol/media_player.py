@@ -61,6 +61,7 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
             | MediaPlayerEntityFeature.TURN_ON
             | MediaPlayerEntityFeature.TURN_OFF
             | MediaPlayerEntityFeature.SELECT_SOURCE
+            | MediaPlayerEntityFeature.PLAY_MEDIA
         )
         
         self._base_features = base_features
@@ -152,6 +153,7 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
                 MediaPlayerEntityFeature.SHUFFLE_SET |
                 MediaPlayerEntityFeature.CLEAR_PLAYLIST |
                 MediaPlayerEntityFeature.PLAY_MEDIA |
+                MediaPlayerEntityFeature.BROWSE_MEDIA |
                 MediaPlayerEntityFeature.GROUPING
             )
             
@@ -589,19 +591,18 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
                     **kwargs
                 }
             )
+        else:
+            # No child entity mapped - cannot play media
+            # This maintains Music Assistant compatibility while providing clear feedback
+            _LOGGER.warning("Zone %d cannot play media: no child entity mapped to current input", 
+                          self.zone_id)
     
     async def async_browse_media(
         self, media_content_type: str | None = None, media_content_id: str | None = None
     ) -> BrowseMedia | None:
-        """Browse media via child entity."""
-        child_entity_id = self._get_child_entity_id()
-        if not child_entity_id:
-            # No child entity mapped - no browsing available
-            return None
-        
-        # For now, return None to disable browse functionality
-        # This is a complex delegation that requires accessing the actual child entity instance
-        # TODO: Implement proper browse media delegation
+        """Browse media - disabled for zone entities."""
+        # Media browsing is not supported for zone entities
+        # Users should browse media through the child entities directly
         return None
     
     async def async_added_to_hass(self) -> None:
