@@ -1,0 +1,33 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Matrio Control Setup",
+        "description": "Configure your Matrio Control device connection. Child entity mappings can be configured later via the Configure button.",
+        "data": {
+          "host": "IP Address",
+          "port": "Port",
+          "zones": "Number of Zones"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the Matrio device. Check the IP address and port."
+    },
+    "abort": {
+      "already_configured": "This device is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Configure Child Entity Mappings", 
+        "description": "Map each input to a child media player entity for streaming and media control. This allows zones to delegate play/pause, media info, and browsing to other media players while retaining direct volume/mute control. Leave unmapped for basic receiver functionality.\n\nConfigured zones: {zones}",
+        "data": {}
+      }
+    },
+    "error": {
+      "update_failed": "Failed to update child entity mappings. Please try again."
+    }
+  }
+}

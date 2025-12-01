@@ -29,20 +29,27 @@ class MatrioControlDataUpdateCoordinator(DataUpdateCoordinator):
         )
         self._entities = []  # Track entities for direct updates
         
-        # Get child entity mappings from YAML configuration
+        # Get child entity mappings from config entry or YAML configuration
         self.child_entity_mappings = {}
-        device_key = f"{entry.data['host']}:{entry.data['port']}"
-        _LOGGER.debug("Looking for YAML config with device_key: %s", device_key)
-        _LOGGER.debug("Available hass.data[DOMAIN]: %s", hass.data.get(DOMAIN, {}))
         
-        yaml_config = hass.data.get(DOMAIN, {}).get(f"yaml_{device_key}", {})
-        _LOGGER.debug("Found yaml_config: %s", yaml_config)
-        
-        if yaml_config:
-            self.child_entity_mappings = yaml_config.get(CONF_CHILD_ENTITY_MAPPINGS, {})
-            _LOGGER.info("Loaded child entity mappings from YAML: %s", self.child_entity_mappings)
+        # First check config entry data (from config flow UI)
+        if CONF_CHILD_ENTITY_MAPPINGS in entry.data:
+            self.child_entity_mappings = entry.data[CONF_CHILD_ENTITY_MAPPINGS]
+            _LOGGER.info("Loaded child entity mappings from config entry: %s", self.child_entity_mappings)
         else:
-            _LOGGER.warning("No YAML configuration found for device %s", device_key)
+            # Fall back to YAML configuration
+            device_key = f"{entry.data['host']}:{entry.data['port']}"
+            _LOGGER.debug("Looking for YAML config with device_key: %s", device_key)
+            _LOGGER.debug("Available hass.data[DOMAIN]: %s", hass.data.get(DOMAIN, {}))
+            
+            yaml_config = hass.data.get(DOMAIN, {}).get(f"yaml_{device_key}", {})
+            _LOGGER.debug("Found yaml_config: %s", yaml_config)
+            
+            if yaml_config:
+                self.child_entity_mappings = yaml_config.get(CONF_CHILD_ENTITY_MAPPINGS, {})
+                _LOGGER.info("Loaded child entity mappings from YAML: %s", self.child_entity_mappings)
+            else:
+                _LOGGER.debug("No YAML configuration found for device %s", device_key)
         
         super().__init__(
             hass,

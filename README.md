@@ -24,10 +24,12 @@ Home Assistant integration for Dayton Audio multi-zone amplifiers using the Matr
 - **Connection Monitoring**: Automatic reconnection on device issues
 
 ### **Media Player Input Mapping**
+- **UI Configuration**: Easy setup through Home Assistant's integration options
 - **Input Mapping**: Link device inputs to existing media player entities for streaming
 - **Media Delegation**: Play/pause, track info, and browsing delegated to child entities
 - **Group Synchronization**: Automatic media player group management
 - **Smart Fallback**: Unmapped inputs work as basic receivers
+- **Real-time Updates**: Configuration changes apply immediately without restart
 
 ### **Rich Home Assistant Entities**
 - **Media Players**: Media player entities for each zone (with Power, Volume, Mute, Source select)
@@ -58,6 +60,8 @@ Home Assistant integration for Dayton Audio multi-zone amplifiers using the Matr
 
 ## ⚙️ Configuration
 
+### Initial Setup
+
 1. Go to **Configuration** > **Integrations**
 2. Click **"Add Integration"**
 3. Search for **"Matrio Control"**
@@ -65,30 +69,51 @@ Home Assistant integration for Dayton Audio multi-zone amplifiers using the Matr
 5. Give your device a name (this name is only used in Home Assistant)
     1. Zone and Input names will be gathered from the device
 
-### Advanced Configuration (Optional)
+### Media Player Input Mapping
 
-#### Media Player Input Mapping
+Link device inputs to existing media player entities for streaming support.
 
-Link device inputs to existing media player entities for streaming support. Add to your `configuration.yaml`:
+#### UI Configuration (Recommended)
+
+After initial setup, configure input mappings through the integration's options:
+
+1. Go to **Configuration** > **Integrations**
+2. Find your **Matrio Control** device
+3. Click **"Configure"** 
+4. Map device inputs to your existing media player entities
+5. Leave inputs unmapped for basic receiver functionality
+
+The UI will display your device's actual input names (e.g., "CD Player", "Streaming") for easy identification.
+
+#### YAML Configuration (Alternative)
+
+For advanced users or bulk configuration, add to your `configuration.yaml`:
 
 ```yaml
 matriocontrol:
   - host: 192.168.1.100
     port: 8899
     child_entity_mappings:
-      input_1: media_player.kitchen_sonos      # Input 1 → Sonos player
-      input_2: media_player.spotify_connect    # Input 2 → Spotify Connect
-      input_5: media_player.living_room_tv     # Input 5 → TV (gaps allowed)
-      # Inputs 3,4,6,7 remain as basic receivers
+      1: media_player.kitchen_sonos      # Input 1 → Sonos player
+      2: media_player.spotify_connect    # Input 2 → Spotify Connect
+      5: media_player.living_room_tv     # Input 5 → TV (gaps allowed)
+      # Inputs 3,4,6,7,8 remain as basic receivers
 ```
 
-**How it works:**
-- **Zone Mirroring**: When a zone selects a mapped input, the zone entity mirrors that input's media player
-- **Enhanced Control**: Mapped zones gain play/pause, track info, and media browsing from the input
+**Configuration Method Priority:**
+- UI configuration takes precedence over YAML configuration
+- Changes made in the UI persist and override YAML settings
+- Use YAML for initial bulk configuration, then manage through UI
+
+**How Input Mapping Works:**
+- **Zone Delegation**: When a zone selects a mapped input, the zone entity delegates media control to the mapped entity
+- **Enhanced Control**: Mapped zones gain play/pause, track info, and media browsing from the child entity
 - **Volume Control**: Zone volume/mute always controlled by amplifier hardware  
-- **Dynamic Switching**: Zones automatically mirror different inputs as you change sources
-- **Group Management**: Zone groups automatically sync with their mapped input's groups
+- **Dynamic Switching**: Zones automatically switch delegation as you change inputs
+- **Group Management**: Zone groups automatically sync with their mapped entity's groups
 - **Fallback Mode**: Zones using unmapped inputs continue working as basic receivers
+- **Real-time Configuration**: Changes made through UI apply immediately without restart
+- **Device-aware**: UI shows actual device input names for easy identification
 
 ### Supported Devices
 - **Dayton Audio DAX88**

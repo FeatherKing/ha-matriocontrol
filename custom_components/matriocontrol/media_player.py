@@ -172,11 +172,38 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
     @callback
     def _child_entity_changed(self, event):
         """Handle child entity state changes."""
-        if event.data["entity_id"] == self._current_child_entity_id:
-            _LOGGER.debug("Zone %d child entity %s state changed", 
+        changed_entity_id = event.data["entity_id"]
+        
+        # Get all mapped child entities for this zone
+        child_entity_mappings = self.coordinator.data.get("child_entity_mappings", {})
+        mapped_child_entities = list(child_entity_mappings.values())
+        
+        # Check if the changed entity is one of our mapped child entities
+        if changed_entity_id in mapped_child_entities:
+            old_state = event.data.get("old_state")
+            new_state = event.data.get("new_state")
+            
+            if old_state and new_state:
+                old_child_state = old_state.state
+                new_child_state = new_state.state
+                
+                # Auto power management: turn zone on when its currently mapped child starts playing
+                if (old_child_state != "playing" and new_child_state == "playing"):
+                    zone_state = self._get_zone_state()
+                    if zone_state and zone_state.get("power") == "OFF":
+                        # Check if this child entity matches the zone's current input mapping
+                        current_child_entity_id = self._get_child_entity_id()
+                        if changed_entity_id == current_child_entity_id:
+                            _LOGGER.info("Zone %d auto-powering on: child entity %s started playing", 
+                                       self.zone_id, changed_entity_id)
+                            # Only power on - input selection is already correct
+                            self.hass.async_create_task(self.async_turn_on())
+        
+        # Also handle changes for currently active child entity (for group sync, etc.)
+        if changed_entity_id == self._current_child_entity_id:
+            _LOGGER.debug("Zone %d current child entity %s state changed", 
                          self.zone_id, self._current_child_entity_id)
             
-            # Check if group membership changed
             old_state = event.data.get("old_state")
             new_state = event.data.get("new_state")
             
@@ -198,7 +225,7 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
                     return  # _force_child_entity_resolution calls async_write_ha_state if needed
             
             self.async_write_ha_state()
-    
+
     def _force_child_entity_resolution(self):
         """Force immediate child entity resolution and feature update."""
         if not self._current_child_entity_id:
@@ -682,11 +709,11 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
             self._child_entity_listener()
             self._child_entity_listener = None
         
-        # Add new listener if we have a child entity
-        if self._current_child_entity_id:
-            self._child_entity_listener = self.hass.bus.async_listen(
-                "state_changed", self._child_entity_changed
-            )
+        # Always add listener to monitor ALL mapped child entities for this zone
+        # This allows auto-power when any mapped child starts playing, even when zone is off
+        self._child_entity_listener = self.hass.bus.async_listen(
+            "state_changed", self._child_entity_changed
+        )
     
     async def async_join_players(self, group_members: list[str]) -> None:
         """Join players together in a group."""
