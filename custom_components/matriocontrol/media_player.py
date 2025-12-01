@@ -69,10 +69,6 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
         # Initialize child entity tracking (but defer feature update until hass is available)
         self._current_child_entity_id = self._get_child_entity_id()
     
-    def schedule_update_ha_state(self):
-        """Schedule an update."""
-        super().schedule_update_ha_state()
-
     def _get_child_entity_id(self) -> str | None:
         """Get the current child entity ID based on selected input."""
         child_entity_mappings = self.coordinator.data.get("child_entity_mappings", {})
