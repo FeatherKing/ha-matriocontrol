@@ -26,7 +26,7 @@ Home Assistant integration for Dayton Audio multi-zone amplifiers using the Matr
 ### **Media Player Input Mapping**
 - **UI Configuration**: Easy setup through Home Assistant's integration options
 - **Input Mapping**: Link device inputs to existing media player entities for streaming
-- **Media Delegation**: Play/pause, track info, and browsing delegated to child entities
+- **Media Delegation**: Play/pause, track info, and media control delegated to child entities
 - **Group Synchronization**: Automatic media player group management
 - **Smart Fallback**: Unmapped inputs work as basic receivers
 - **Real-time Updates**: Configuration changes apply immediately without restart
@@ -107,7 +107,7 @@ matriocontrol:
 
 **How Input Mapping Works:**
 - **Zone Delegation**: When a zone selects a mapped input, the zone entity delegates media control to the mapped entity
-- **Enhanced Control**: Mapped zones gain play/pause, track info, and media browsing from the child entity
+- **Enhanced Control**: Mapped zones gain play/pause, track info, and media control from the child entity
 - **Volume Control**: Zone volume/mute always controlled by amplifier hardware  
 - **Dynamic Switching**: Zones automatically switch delegation as you change inputs
 - **Group Management**: Zone groups automatically sync with their mapped entity's groups

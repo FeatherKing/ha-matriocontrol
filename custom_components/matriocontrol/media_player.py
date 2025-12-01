@@ -10,7 +10,6 @@ from homeassistant.components.media_player import (
     MediaPlayerState,
     MediaPlayerDeviceClass,
     MediaType,
-    BrowseMedia,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
@@ -143,8 +142,8 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
             # Combine base receiver features with child's media playback features
             # Filter child features to only include ones that make sense to pass through
             allowed_child_features = (
-                MediaPlayerEntityFeature.PLAY |
                 MediaPlayerEntityFeature.PAUSE |
+                MediaPlayerEntityFeature.PLAY |
                 MediaPlayerEntityFeature.STOP |
                 MediaPlayerEntityFeature.PREVIOUS_TRACK |
                 MediaPlayerEntityFeature.NEXT_TRACK |
@@ -153,7 +152,6 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
                 MediaPlayerEntityFeature.SHUFFLE_SET |
                 MediaPlayerEntityFeature.CLEAR_PLAYLIST |
                 MediaPlayerEntityFeature.PLAY_MEDIA |
-                MediaPlayerEntityFeature.BROWSE_MEDIA |
                 MediaPlayerEntityFeature.GROUPING
             )
             
@@ -623,14 +621,6 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
             # This maintains Music Assistant compatibility while providing clear feedback
             _LOGGER.warning("Zone %d cannot play media: no child entity mapped to current input", 
                           self.zone_id)
-    
-    async def async_browse_media(
-        self, media_content_type: str | None = None, media_content_id: str | None = None
-    ) -> BrowseMedia | None:
-        """Browse media - disabled for zone entities."""
-        # Media browsing is not supported for zone entities
-        # Users should browse media through the child entities directly
-        return None
     
     async def async_added_to_hass(self) -> None:
         """Called when entity is added to hass."""
