@@ -14,8 +14,9 @@ from homeassistant.components.media_player import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_track_state_change_event
 
-from .const import DOMAIN, INPUTS, ZONES, VOLUME_MAX
+from .const import DOMAIN, INPUTS, VOLUME_MAX
 from .coordinator import MatrioControlDataUpdateCoordinator
 from .entity import MatrioControlEntity
 
@@ -68,11 +69,11 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
         
         # Initialize child entity tracking (but defer feature update until hass is available)
         self._current_child_entity_id = self._get_child_entity_id()
+        
+        # Initialize state change tracking attributes
+        self._child_entity_listeners = []  # List of unsub functions for tracked entities
+        self._last_child_entity_id = None
     
-    def schedule_update_ha_state(self):
-        """Schedule an update."""
-        super().schedule_update_ha_state()
-
     def _get_child_entity_id(self) -> str | None:
         """Get the current child entity ID based on selected input."""
         child_entity_mappings = self.coordinator.data.get("child_entity_mappings", {})
@@ -97,17 +98,6 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
         input_key = f"input_{current_input}"
         result = child_entity_mappings.get(input_key)
         
-        # Update cached child entity ID if it changed
-        if result != self._current_child_entity_id:
-            old_child = self._current_child_entity_id
-            self._current_child_entity_id = result
-            _LOGGER.debug("Zone %d child entity changed: %s -> %s", 
-                         self.zone_id, old_child, result)
-            
-            # Update supported features when child entity changes
-            self._update_supported_features()
-        
-        # Look up mapped child entity
         return result
 
 
@@ -278,7 +268,10 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
         """Return the name of the entity."""
         zones = self.coordinator.data.get("zones", {})
         zone_key = f"zone_{self.zone_id}"
-        return zones.get(zone_key, f"Zone {self.zone_id}")
+        zone_name = zones.get(zone_key, f"Zone {self.zone_id}")
+        _LOGGER.debug("Zone %d name lookup: zones=%s, key=%s, result=%s", 
+                     self.zone_id, zones, zone_key, zone_name)
+        return zone_name
 
     @property
     def state(self) -> MediaPlayerState:
@@ -632,36 +625,15 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
         # Update supported features based on current child entity
         self._update_supported_features()
         
-        # Set up child entity state change listener to detect when child becomes available
-        if self._current_child_entity_id:
-            # Listen for when our specific child entity becomes available or changes
-            @callback
-            def handle_child_entity_registry_update(event):
-                """Handle when child entity is added to or updated in the registry."""
-                if event.data.get("entity_id") == self._current_child_entity_id:
-                    self._force_child_entity_resolution()
-            
-            # Listen for state_changed events for our child entity
-            @callback 
-            def handle_child_entity_state_added(event):
-                """Handle when child entity state becomes available."""
-                if (event.data.get("entity_id") == self._current_child_entity_id and
-                    event.data.get("old_state") is None):
-                    self._force_child_entity_resolution()
-            
-            # Set up listeners
-            self.async_on_remove(
-                self.hass.bus.async_listen("entity_registry_updated", handle_child_entity_registry_update)
-            )
-            self.async_on_remove(
-                self.hass.bus.async_listen("state_changed", handle_child_entity_state_added)
-            )
+        # The targeted state change listeners in _update_child_entity_listener()
+        # handle all the child entity state changes we need
     
     async def async_will_remove_from_hass(self) -> None:
         """Called when entity will be removed from hass."""
-        # Clean up child entity listener
-        if hasattr(self, "_child_entity_listener") and self._child_entity_listener:
-            self._child_entity_listener()
+        # Clean up child entity listeners
+        for unsub in self._child_entity_listeners:
+            unsub()
+        self._child_entity_listeners.clear()
         
         await super().async_will_remove_from_hass()
     
@@ -670,11 +642,17 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
         """Handle updated data from the coordinator."""
         # Check if child entity mapping changed
         new_child_entity_id = self._get_child_entity_id()
+        old_child_entity_id = self._current_child_entity_id
         
-        if new_child_entity_id != self._current_child_entity_id:
-            old_child_entity_id = self._current_child_entity_id
+        if new_child_entity_id != old_child_entity_id:
+            # Update cached child entity ID
             self._current_child_entity_id = new_child_entity_id
+            
+            # Update state tracking for the new child entity
             self._update_child_entity_listener()
+            
+            # Update supported features based on new child entity
+            self._update_supported_features()
             
             _LOGGER.info("Zone %d child entity changed from %s to %s", 
                          self.zone_id, old_child_entity_id, new_child_entity_id)
@@ -694,16 +672,33 @@ class MatrioControlMediaPlayer(MatrioControlEntity, MediaPlayerEntity):
     
     def _update_child_entity_listener(self):
         """Update the listener for child entity state changes."""
-        # Remove existing listener
-        if hasattr(self, "_child_entity_listener") and self._child_entity_listener:
-            self._child_entity_listener()
-            self._child_entity_listener = None
+        # Remove existing listeners
+        for unsub in self._child_entity_listeners:
+            unsub()
+        self._child_entity_listeners.clear()
         
-        # Always add listener to monitor ALL mapped child entities for this zone
-        # This allows auto-power when any mapped child starts playing, even when zone is off
-        self._child_entity_listener = self.hass.bus.async_listen(
-            "state_changed", self._child_entity_changed
-        )
+        if not self.hass:
+            return
+            
+        # Get all mapped child entities for this zone (for auto-power management)
+        child_entity_mappings = self.coordinator.data.get("child_entity_mappings", {})
+        entities_to_track = set()
+        
+        # Add all mapped child entities (for auto-power when any mapped child starts playing)
+        for child_entity_id in child_entity_mappings.values():
+            if child_entity_id:
+                entities_to_track.add(child_entity_id)
+        
+        # Add current child entity (for group sync and feature updates)
+        if self._current_child_entity_id:
+            entities_to_track.add(self._current_child_entity_id)
+        
+        # Set up targeted state change tracking for each entity
+        for entity_id in entities_to_track:
+            unsub = async_track_state_change_event(
+                self.hass, entity_id, self._child_entity_changed
+            )
+            self._child_entity_listeners.append(unsub)
     
     async def async_join_players(self, group_members: list[str]) -> None:
         """Join players together in a group."""
