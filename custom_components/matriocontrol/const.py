@@ -7,6 +7,7 @@ CONF_HOST = "IP Address"
 CONF_PORT = "Port"
 CONF_DEVICE_NAME = "Device Name"
 CONF_ZONES = "Number of Zones"
+CONF_CHILD_ENTITY_MAPPINGS = "child_entity_mappings"
 
 # Default values
 DEFAULT_PORT = 8899
@@ -73,3 +74,8 @@ BASS_TREBLE_MAX = 12
 
 # Legacy input mappings (for backward compatibility)
 INPUT_MAPPINGS = INPUTS
+
+# Zone/Device state constants
+POWER_OFF = "OFF"
+POWER_ON = "ON"
+MUTE_STATE_MUTED = "MUTED"

@@ -116,6 +116,7 @@ class UniversalHNGSyncDecoder:
             'zone_id': zone + 1,
             'power': power,
             'input': input_name,
+            'input_number': input_val,
             'volume': volume,
             'balance': balance,
             'mute': mute,
@@ -855,8 +856,11 @@ class MatrioController:
                     _LOGGER.debug(f"Zone {zone_id} mute: {old_value} -> {self.zones[zone_id]['mute']}")
                 elif change_type == "input":
                     old_value = self.zones[zone_id].get('input')
+                    old_input_number = self.zones[zone_id].get('input_number')
                     self.zones[zone_id]['input'] = broadcast_info['input_name']
+                    self.zones[zone_id]['input_number'] = broadcast_info['input_id']
                     _LOGGER.debug(f"Zone {zone_id} input: {old_value} -> {self.zones[zone_id]['input']}")
+                    _LOGGER.debug(f"Zone {zone_id} input_number: {old_input_number} -> {self.zones[zone_id]['input_number']}")
                 elif change_type == "balance":
                     old_value = self.zones[zone_id].get('balance')
                     self.zones[zone_id]['balance'] = str(broadcast_info['balance'])
