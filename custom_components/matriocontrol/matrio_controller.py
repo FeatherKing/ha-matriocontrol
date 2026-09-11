@@ -459,7 +459,31 @@ class BroadcastDecoder:
 
 class MatrioController:
     """Complete controller for Dayton Audio multi-zone amplifiers using Matrio Control protocol"""
-    
+
+    # Shared request packet used both to bootstrap initial state on connect
+    # (_send_binary_initialization) and to actively request a fresh full
+    # zone-status resync (request_zone_sync) as a periodic fallback to
+    # broadcast-driven updates.
+    HNG_SYNC_REQUEST_PACKET = bytes.fromhex(
+        "189618200f0000005706000000000000000000004d43552b5041532b820affffff8926"
+    )
+
+    # Give up on an in-flight active sync request if the response never
+    # completes within this many seconds, or the buffered data grows past
+    # this many bytes - either way, a lost/garbled response must not
+    # permanently wedge the reader loop into treating all future broadcasts
+    # as sync-buffer data.
+    SYNC_ABANDON_TIMEOUT = 10.0
+    SYNC_BUFFER_MAX_BYTES = 4096
+
+    # Largest supported HNG sync packet size. Used as the completeness
+    # threshold before attempting extraction: only decode once the buffer
+    # holds a full packet's worth of bytes past the signature, so we never
+    # extract in the ambiguous 68-95 byte window where a truncated 96-byte
+    # packet would spuriously satisfy the 68-byte fallback and mis-decode
+    # power/mute with the reversed byte convention.
+    SYNC_PACKET_COMPLETE_BYTES = 96
+
     def __init__(self, ip: str, port: int = 8899):
         """
         Initialize Matrio controller
@@ -480,7 +504,15 @@ class MatrioController:
         self.connected = False
         self._reader_task = None
         self._writer_task = None
-        
+
+        # State for an in-flight active zone-status resync request (see
+        # request_zone_sync / _reader_loop). Reset on connect()/disconnect()
+        # since this MatrioController instance survives reconnects.
+        self._awaiting_sync: bool = False
+        self._sync_buffer: bytes = b""
+        self._sync_chunk_count: int = 0
+        self._sync_started_monotonic: float = 0.0
+
         # Default input mapping based on capture analysis
         self.inputs = {
             1: "Input1",
@@ -525,7 +557,12 @@ class MatrioController:
             self.reader, self.writer = await asyncio.open_connection(self.ip, self.port)
             _LOGGER.info(f"TCP connection established to {self.ip}:{self.port}")
             _LOGGER.debug(f"Reader: {self.reader}, Writer: {self.writer}")
-            
+
+            # This MatrioController instance survives reconnects, so clear
+            # any in-flight sync-request state left over from a prior
+            # connection before it can wedge the new reader loop.
+            self._reset_sync_state()
+
             # Store state callback
             self.state_callback = state_callback
             _LOGGER.debug(f"State callback set: {state_callback is not None}")
@@ -611,27 +648,33 @@ class MatrioController:
                     if len(data) == 0:
                         _LOGGER.warning("Connection lost - received empty data")
                         break
-                    
+
                     packet_count += 1
-                    # Decode the packet
-                    packet_hex = data.hex()
-                    _LOGGER.debug(f"Received packet #{packet_count} ({len(data)} bytes): {packet_hex}")
-                    
-                    # Try to decode as broadcast packet
-                    if self.broadcast_decoder:
-                        _LOGGER.debug("Attempting to decode packet as broadcast...")
-                        broadcast_info = self.broadcast_decoder.decode_packet(packet_hex)
-                        
-                        if broadcast_info:
-                            _LOGGER.debug(f"Successfully decoded broadcast: {broadcast_info}")
-                            await self._handle_broadcast(broadcast_info)
-                        else:
-                            _LOGGER.debug("Packet is not a recognized broadcast packet")
-                    else:
-                        _LOGGER.warning("Broadcast decoder not initialized")
-                            
+
+                    if self._awaiting_sync:
+                        # This chunk is (part of) the response to an active
+                        # request_zone_sync() call - route it through the
+                        # sync buffer instead of normal broadcast decoding.
+                        # Any bytes that arrived after the sync packet are
+                        # returned so they still get decoded normally below.
+                        data = self._process_sync_chunk(data)
+                        if data is None:
+                            continue
+
+                    _LOGGER.debug(f"Received packet #{packet_count} ({len(data)} bytes): {data.hex()}")
+                    await self._decode_and_handle_broadcast(data)
+
                 except asyncio.TimeoutError:
-                    # Timeout is expected, continue listening
+                    # Timeout is expected, continue listening. If we're still
+                    # waiting on a sync response and it's been long enough,
+                    # give _process_sync_chunk a chance to decode whatever is
+                    # already buffered (e.g. both response writes arrived in
+                    # a single earlier read, satisfying the response in one
+                    # chunk) before falling back to abandoning it outright.
+                    if self._awaiting_sync and self._sync_timed_out():
+                        leftover = self._process_sync_chunk(b"")
+                        if leftover:
+                            await self._decode_and_handle_broadcast(leftover)
                     continue
                 except Exception as e:
                     if self.connected:
@@ -818,6 +861,25 @@ class MatrioController:
             _LOGGER.debug("Response that failed to parse: %s", response.hex())
             raise RuntimeError(f"Failed to parse zone/input names from response: {e}")
     
+    async def _decode_and_handle_broadcast(self, data: bytes) -> None:
+        """Decode a chunk as a broadcast/command-echo packet and apply it."""
+        if not data:
+            return
+
+        if not self.broadcast_decoder:
+            _LOGGER.warning("Broadcast decoder not initialized")
+            return
+
+        packet_hex = data.hex()
+        _LOGGER.debug("Attempting to decode packet as broadcast...")
+        broadcast_info = self.broadcast_decoder.decode_packet(packet_hex)
+
+        if broadcast_info:
+            _LOGGER.debug(f"Successfully decoded broadcast: {broadcast_info}")
+            await self._handle_broadcast(broadcast_info)
+        else:
+            _LOGGER.debug("Packet is not a recognized broadcast packet")
+
     async def _handle_broadcast(self, broadcast_info: Dict[str, Any]):
         """Handle broadcast packet and update state"""
         try:
@@ -886,7 +948,103 @@ class MatrioController:
                 
         except Exception as e:
             _LOGGER.error(f"Failed to handle broadcast: {e}")
-    
+
+    def _sync_buffer_has_complete_packet(self) -> bool:
+        """True once the sync buffer holds a full packet past the 82 0c signature."""
+        sig_pos = self._sync_buffer.find(b'\x82\x0c')
+        return sig_pos != -1 and len(self._sync_buffer) - sig_pos >= self.SYNC_PACKET_COMPLETE_BYTES
+
+    def _sync_timed_out(self) -> bool:
+        """Check whether the in-flight request_zone_sync() has taken too long."""
+        return time.monotonic() - self._sync_started_monotonic > self.SYNC_ABANDON_TIMEOUT
+
+    def _process_sync_chunk(self, data: bytes) -> Optional[bytes]:
+        """
+        Feed a chunk of data into the in-flight active sync buffer.
+
+        Returns any leftover bytes that should still be run through normal
+        broadcast decoding (e.g. a broadcast packet that happened to arrive
+        appended right after the sync response), or None if the whole chunk
+        was consumed or the sync response is still incomplete.
+        """
+        self._sync_buffer += data
+        self._sync_chunk_count += 1
+
+        # Only attempt extraction once the buffer holds a complete packet's
+        # worth of bytes past the 82 0c signature (SYNC_PACKET_COMPLETE_BYTES).
+        # This decodes immediately even when both device writes coalesce into
+        # a single TCP read, and never extracts a truncated buffer - a partial
+        # 96-byte packet in the 68-95 byte window would otherwise spuriously
+        # satisfy _extract_hng_sync_packet's 68-byte fallback and mis-decode
+        # power/mute with the reversed byte convention.
+        if self._sync_buffer_has_complete_packet():
+            hng_hex = self._extract_hng_sync_packet(self._sync_buffer)
+            if hng_hex:
+                return self._finish_sync(hng_hex)
+
+        if self._sync_timed_out() or len(self._sync_buffer) > self.SYNC_BUFFER_MAX_BYTES:
+            # An abandoned buffer never reached a complete packet (the gate
+            # above would have decoded it otherwise), so don't risk decoding a
+            # truncated response - release whatever's buffered for normal
+            # broadcast decoding instead.
+            _LOGGER.warning(
+                "Abandoning zone sync request - no valid response after %d bytes / %.1fs / %d chunk(s)",
+                len(self._sync_buffer), time.monotonic() - self._sync_started_monotonic, self._sync_chunk_count,
+            )
+            leftover = self._sync_buffer
+            self._reset_sync_state()
+            return leftover if leftover else None
+
+        # Still waiting on more data to complete the sync response.
+        return None
+
+    def _finish_sync(self, hng_hex: str) -> Optional[bytes]:
+        """Decode an extracted HNG sync packet, merge it in, and reset sync state."""
+        sig_pos = self._sync_buffer.find(b'\x82\x0c')
+        consumed_end = sig_pos + len(hng_hex) // 2 if sig_pos != -1 else len(self._sync_buffer)
+        leftover = self._sync_buffer[consumed_end:]
+
+        self._reset_sync_state()
+
+        try:
+            result = self.hng_decoder.decode_hng_sync_packet(hng_hex, self.inputs)
+            if result and 'zones' in result:
+                self._handle_full_sync(result)
+            else:
+                _LOGGER.warning("Zone sync response could not be decoded")
+        except Exception as e:
+            _LOGGER.error(f"Failed to decode zone sync response: {e}")
+
+        return leftover if leftover else None
+
+    def _reset_sync_state(self) -> None:
+        self._awaiting_sync = False
+        self._sync_buffer = b""
+        self._sync_chunk_count = 0
+
+    def _handle_full_sync(self, hng_result: Dict[str, Any]) -> None:
+        """Merge a decoded full zone-status sync into self.zones and notify."""
+        zones = hng_result.get('zones', {})
+        if not zones:
+            _LOGGER.debug("Zone sync response contained no zones")
+            return
+
+        _LOGGER.info("Zone sync response received: %d zones", len(zones))
+
+        for zone_id, zone_data in zones.items():
+            self.zones.setdefault(zone_id, {})
+            for key in ('power', 'input', 'volume', 'mute', 'balance', 'bass', 'treble'):
+                if key in zone_data:
+                    self.zones[zone_id][key] = zone_data[key]
+            _LOGGER.debug(f"Zone {zone_id} synced: {self.zones[zone_id]}")
+
+        if self.state_callback:
+            _LOGGER.debug("Calling state callback with synced state...")
+            self.state_callback(self.zones)
+            _LOGGER.debug("State callback completed")
+        else:
+            _LOGGER.debug("No state callback set, skipping notification")
+
     async def _setup_upnp_subscriptions(self) -> bool:
         """Setup UPnP event subscriptions on port 59152"""
         try:
@@ -1041,8 +1199,7 @@ class MatrioController:
         """Send binary protocol initialization sequence"""
         try:
             # Send initialization command (0x0a)
-            init_packet = bytes.fromhex("189618200f0000005706000000000000000000004d43552b5041532b820affffff8926")
-            self.writer.write(init_packet)
+            self.writer.write(self.HNG_SYNC_REQUEST_PACKET)
             await self.writer.drain()
             
             # Wait for HNG_SYNC_COMMAND response
@@ -1151,6 +1308,7 @@ class MatrioController:
         
         self.reader = None
         self.writer = None
+        self._reset_sync_state()
         _LOGGER.info("Disconnected from Matrio device")
     
     
@@ -1904,7 +2062,46 @@ class MatrioController:
             bool: True if command sent successfully
         """
         return await self._send_audio_control_command(zone_id, 'treble', treble)
-    
+
+    async def request_zone_sync(self) -> bool:
+        """
+        Actively request a fresh full zone-status resync from the device.
+
+        This only writes the request packet - it never reads a response.
+        The response arrives asynchronously on the persistent _reader_loop
+        (which is the sole reader of self.reader) and is decoded there,
+        merged into self.zones, and delivered via state_callback exactly
+        like a broadcast. This is what lets the coordinator's periodic poll
+        catch device-initiated state changes (e.g. a firmware auto-timeout)
+        that the amp doesn't happen to broadcast, without racing the
+        persistent reader loop's own concurrent read of the same socket.
+
+        Returns:
+            bool: True if the request was written successfully
+        """
+        if not self.writer:
+            _LOGGER.debug("request_zone_sync: not connected, skipping")
+            return False
+
+        if self._awaiting_sync:
+            _LOGGER.debug("request_zone_sync: a sync request is already in flight, skipping")
+            return False
+
+        try:
+            self._awaiting_sync = True
+            self._sync_buffer = b""
+            self._sync_chunk_count = 0
+            self._sync_started_monotonic = time.monotonic()
+
+            self.writer.write(self.HNG_SYNC_REQUEST_PACKET)
+            await self.writer.drain()
+            _LOGGER.debug("Zone sync request sent")
+            return True
+        except Exception as e:
+            _LOGGER.error(f"Failed to send zone sync request: {e}")
+            self._reset_sync_state()
+            return False
+
     async def trigger_hng_sync(self) -> Dict[str, Any] | None:
         """
         Trigger HNG sync packet and decode all zone states
@@ -1920,8 +2117,7 @@ class MatrioController:
             _LOGGER.debug("Triggering HNG sync...")
             
             # Use the existing protocol command that we know works
-            init_packet = bytes.fromhex("189618200f0000005706000000000000000000004d43552b5041532b820affffff8926")
-            self.writer.write(init_packet)
+            self.writer.write(self.HNG_SYNC_REQUEST_PACKET)
             await self.writer.drain()
             
             # Wait for HNG_SYNC_COMMAND response
@@ -1987,7 +2183,12 @@ class MatrioController:
             # Find the first occurrence of HNG sync signature
             hng_pos = data.find(hng_signature)
             if hng_pos == -1:
-                _LOGGER.warning("HNG sync signature not found in packet data")
+                # Expected/routine when called against a partial buffer
+                # while an active sync response is still arriving in
+                # multiple chunks (see request_zone_sync/_process_sync_chunk)
+                # - callers that need to know extraction ultimately failed
+                # after gathering all expected data log their own warning.
+                _LOGGER.debug("HNG sync signature not found in packet data (yet)")
                 return None
             
             # Extract the HNG sync packet - try both 68-byte and 96-byte sizes
@@ -2007,7 +2208,9 @@ class MatrioController:
                 _LOGGER.debug("Extracted 68-byte HNG sync packet: %d bytes", len(hng_packet))
                 return hng_packet.hex()
             
-            _LOGGER.warning("HNG sync packet extends beyond received data")
+            # Also routine while more chunks of an active sync response are
+            # still arriving - see comment above.
+            _LOGGER.debug("HNG sync packet extends beyond received data (yet)")
             return None
             
         except Exception as e:

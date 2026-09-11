@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import timedelta
 
 from homeassistant.config_entries import ConfigEntry
@@ -14,7 +15,11 @@ from .matrio_controller import MatrioController
 
 _LOGGER = logging.getLogger(__name__)
 
-UPDATE_INTERVAL = timedelta(seconds=60)  # Minimal polling - rely on broadcast updates for real-time changes
+# Broadcasts drive near-real-time updates the rest of the time; this interval
+# is also used to throttle an active zone-status resync request (see
+# _async_update_data) that catches device-initiated state changes (e.g. a
+# firmware auto-timeout) the amp doesn't happen to broadcast on its own.
+UPDATE_INTERVAL = timedelta(seconds=60)
 
 
 class MatrioControlDataUpdateCoordinator(DataUpdateCoordinator):
@@ -28,7 +33,10 @@ class MatrioControlDataUpdateCoordinator(DataUpdateCoordinator):
             entry.data["port"]
         )
         self._entities = []  # Track entities for direct updates
-        
+        # -inf so the very first eligible tick always fires a sync request,
+        # regardless of how long the process/system has been up.
+        self._last_sync_request_monotonic = float("-inf")
+
         super().__init__(
             hass,
             _LOGGER,
@@ -63,7 +71,21 @@ class MatrioControlDataUpdateCoordinator(DataUpdateCoordinator):
                         "zone_states": {},
                     }
                 _LOGGER.debug("Connection successful")
-            
+
+            # Actively request a fresh full zone-status resync, throttled to
+            # once per UPDATE_INTERVAL. This is what catches device-initiated
+            # state changes (e.g. a firmware auto-timeout powering off a
+            # zone) that the amp doesn't happen to broadcast on its own -
+            # without this, _async_update_data would just keep re-serving a
+            # stale cache. Throttled independently of the coordinator's own
+            # scheduling because state_callback below also triggers
+            # async_request_refresh() on every broadcast, which would
+            # otherwise call this far more often than once per interval.
+            now = time.monotonic()
+            if now - self._last_sync_request_monotonic >= UPDATE_INTERVAL.total_seconds():
+                if await self.controller.request_zone_sync():
+                    self._last_sync_request_monotonic = now
+
             # Get current zone states from the controller
             zone_states = self.controller.zones.copy()
             _LOGGER.debug("Retrieved %d zones from controller", len(zone_states))
