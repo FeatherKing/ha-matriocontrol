@@ -468,21 +468,42 @@ class MatrioController:
         "189618200f0000005706000000000000000000004d43552b5041532b820affffff8926"
     )
 
-    # Give up on an in-flight active sync request if the response never
-    # completes within this many seconds, or the buffered data grows past
-    # this many bytes - either way, a lost/garbled response must not
-    # permanently wedge the reader loop into treating all future broadcasts
-    # as sync-buffer data.
-    SYNC_ABANDON_TIMEOUT = 10.0
+    # Give up on an in-flight sync request after this many seconds (or this
+    # many buffered bytes) so a lost/garbled response can't wedge the reader
+    # loop into treating all future broadcasts as sync-buffer data. Kept short
+    # because the amp answers immediately and this also bounds how long
+    # request_zone_sync holds _command_lock (blocking user commands) when the
+    # device is unresponsive; unreachable-detection stays slow regardless,
+    # since the coordinator throttles sync attempts to one per ~60s.
+    SYNC_ABANDON_TIMEOUT = 2.0
     SYNC_BUFFER_MAX_BYTES = 4096
 
-    # Largest supported HNG sync packet size. Used as the completeness
-    # threshold before attempting extraction: only decode once the buffer
-    # holds a full packet's worth of bytes past the signature, so we never
-    # extract in the ambiguous 68-95 byte window where a truncated 96-byte
-    # packet would spuriously satisfy the 68-byte fallback and mis-decode
-    # power/mute with the reversed byte convention.
+    # Idle timeout for each reader-loop read(). Bounds how quickly an abandoned
+    # sync is detected (only re-checked when a read returns or times out), so
+    # keep it under SYNC_ABANDON_TIMEOUT. Broadcasts are unaffected - a read
+    # returns the instant data arrives.
+    READ_TIMEOUT = 1.0
+
+    # Require this many consecutive abandoned sync round-trips before
+    # declaring the device unreachable, so a single transient blip (e.g. a
+    # brief Wi-Fi hiccup) doesn't force a reconnect on its own - only a
+    # sustained failure to respond does. Worst-case detection latency this
+    # adds: (SYNC_FAILURE_THRESHOLD - 1) extra ~60s poll cycles.
+    SYNC_FAILURE_THRESHOLD = 2
+
+    # Bounds how long writer.write()/drain() itself is allowed to block
+    # before giving up - this is local socket buffering, not waiting on the
+    # device, so it should always be fast. Without this, a wedged TCP send
+    # buffer would hold _command_lock indefinitely and stall every other
+    # queued command/sync request behind it.
+    COMMAND_WRITE_TIMEOUT = 2.0
+
+    # Supported HNG sync packet sizes. A short packet is complete before the
+    # 96-byte threshold only when its protocol terminator is present; that
+    # distinguishes it from the first 68 bytes of a fragmented long packet.
+    SYNC_PACKET_SHORT_BYTES = 68
     SYNC_PACKET_COMPLETE_BYTES = 96
+    SYNC_PACKET_TERMINATOR = b'\xff\xff\xcc\x26'
 
     def __init__(self, ip: str, port: int = 8899):
         """
@@ -512,6 +533,31 @@ class MatrioController:
         self._sync_buffer: bytes = b""
         self._sync_chunk_count: int = 0
         self._sync_started_monotonic: float = 0.0
+        # Set by _process_sync_chunk when it abandons an in-flight sync
+        # request with no valid response - _reader_loop treats this as a
+        # liveness failure and ends the connection so the coordinator
+        # reconnects, instead of silently keeping a stale "connected" state.
+        self._sync_unreachable: bool = False
+        # Counts consecutive abandoned sync round-trips; reset to 0 on any
+        # successful round-trip (_finish_sync) or fresh connect()/disconnect().
+        self._consecutive_sync_failures: int = 0
+        # Resolved by _finish_sync() (True) or the abandon path in
+        # _process_sync_chunk (False) so request_zone_sync() can await the
+        # actual round-trip outcome instead of returning as soon as the
+        # request is written.
+        self._sync_result_future: Optional[asyncio.Future] = None
+
+        # Serializes all outbound zone commands (power/input/volume/mute/
+        # audio control) *and* active sync requests, so only one
+        # write-then-await-response cycle - of either kind - is ever in
+        # flight at a time, and all of them route their responses through
+        # the single persistent _reader_loop instead of racing their own
+        # reader.read() against it or against each other.
+        # _pending_command_response is reset on connect()/disconnect(); the
+        # lock itself never needs resetting - every holder releases it via
+        # `async with`, even when the awaited response times out.
+        self._command_lock: asyncio.Lock = asyncio.Lock()
+        self._pending_command_response: Optional[asyncio.Future] = None
 
         # Default input mapping based on capture analysis
         self.inputs = {
@@ -552,7 +598,15 @@ class MatrioController:
         """Connect to Matrio-compatible device and start reader/writer tasks"""
         try:
             _LOGGER.debug(f"Attempting to connect to Matrio device at {self.ip}:{self.port}")
-            
+
+            # This instance survives reconnects. If the reader loop broke out
+            # on a liveness failure it just flipped `connected` to False without
+            # closing the socket, so tear down any leftover connection here
+            # before opening a new one to avoid orphaning the old writer/FD.
+            if self.writer is not None or self._reader_task is not None:
+                _LOGGER.debug("Tearing down stale connection before reconnecting")
+                await self.disconnect()
+
             # Create connection
             self.reader, self.writer = await asyncio.open_connection(self.ip, self.port)
             _LOGGER.info(f"TCP connection established to {self.ip}:{self.port}")
@@ -562,6 +616,8 @@ class MatrioController:
             # any in-flight sync-request state left over from a prior
             # connection before it can wedge the new reader loop.
             self._reset_sync_state()
+            self._pending_command_response = None
+            self._consecutive_sync_failures = 0
 
             # Store state callback
             self.state_callback = state_callback
@@ -643,13 +699,22 @@ class MatrioController:
             while self.connected:
                 try:
                     # Read data with timeout
-                    data = await asyncio.wait_for(self.reader.read(1024), timeout=5.0)
+                    data = await asyncio.wait_for(self.reader.read(1024), timeout=self.READ_TIMEOUT)
                     
                     if len(data) == 0:
                         _LOGGER.warning("Connection lost - received empty data")
                         break
 
                     packet_count += 1
+
+                    if self._pending_command_response is not None and not self._pending_command_response.done():
+                        # This chunk is the ack for an in-flight command sent
+                        # via _send_and_await_response() - deliver it there
+                        # instead of decoding it as a broadcast, matching how
+                        # these ack payloads were always handled (only ever
+                        # checked for non-zero length, never decoded).
+                        self._pending_command_response.set_result(data)
+                        continue
 
                     if self._awaiting_sync:
                         # This chunk is (part of) the response to an active
@@ -658,6 +723,14 @@ class MatrioController:
                         # Any bytes that arrived after the sync packet are
                         # returned so they still get decoded normally below.
                         data = self._process_sync_chunk(data)
+                        if self._sync_unreachable:
+                            # Device didn't respond to the sync request in
+                            # time - treat as a liveness failure and end the
+                            # loop (the finally block below flips `connected`
+                            # to False so the coordinator reconnects) rather
+                            # than silently keep serving a stale cache.
+                            _LOGGER.warning("Ending reader loop - device did not respond to zone sync request")
+                            break
                         if data is None:
                             continue
 
@@ -673,6 +746,9 @@ class MatrioController:
                     # chunk) before falling back to abandoning it outright.
                     if self._awaiting_sync and self._sync_timed_out():
                         leftover = self._process_sync_chunk(b"")
+                        if self._sync_unreachable:
+                            _LOGGER.warning("Ending reader loop - device did not respond to zone sync request")
+                            break
                         if leftover:
                             await self._decode_and_handle_broadcast(leftover)
                     continue
@@ -950,9 +1026,21 @@ class MatrioController:
             _LOGGER.error(f"Failed to handle broadcast: {e}")
 
     def _sync_buffer_has_complete_packet(self) -> bool:
-        """True once the sync buffer holds a full packet past the 82 0c signature."""
+        """True once the sync buffer holds a complete supported HNG packet."""
         sig_pos = self._sync_buffer.find(b'\x82\x0c')
-        return sig_pos != -1 and len(self._sync_buffer) - sig_pos >= self.SYNC_PACKET_COMPLETE_BYTES
+        if sig_pos == -1:
+            return False
+
+        available = len(self._sync_buffer) - sig_pos
+        if available >= self.SYNC_PACKET_COMPLETE_BYTES:
+            return True
+
+        short_end = sig_pos + self.SYNC_PACKET_SHORT_BYTES
+        return (
+            available >= self.SYNC_PACKET_SHORT_BYTES
+            and self._sync_buffer[short_end - len(self.SYNC_PACKET_TERMINATOR):short_end]
+            == self.SYNC_PACKET_TERMINATOR
+        )
 
     def _sync_timed_out(self) -> bool:
         """Check whether the in-flight request_zone_sync() has taken too long."""
@@ -970,13 +1058,9 @@ class MatrioController:
         self._sync_buffer += data
         self._sync_chunk_count += 1
 
-        # Only attempt extraction once the buffer holds a complete packet's
-        # worth of bytes past the 82 0c signature (SYNC_PACKET_COMPLETE_BYTES).
-        # This decodes immediately even when both device writes coalesce into
-        # a single TCP read, and never extracts a truncated buffer - a partial
-        # 96-byte packet in the 68-95 byte window would otherwise spuriously
-        # satisfy _extract_hng_sync_packet's 68-byte fallback and mis-decode
-        # power/mute with the reversed byte convention.
+        # Attempt extraction once either the framed 68-byte response or the
+        # full 96-byte response has arrived. The short-packet terminator check
+        # prevents a fragmented long packet from being decoded prematurely.
         if self._sync_buffer_has_complete_packet():
             hng_hex = self._extract_hng_sync_packet(self._sync_buffer)
             if hng_hex:
@@ -992,7 +1076,23 @@ class MatrioController:
                 len(self._sync_buffer), time.monotonic() - self._sync_started_monotonic, self._sync_chunk_count,
             )
             leftover = self._sync_buffer
+            result_future = self._sync_result_future
             self._reset_sync_state()
+
+            # Require SYNC_FAILURE_THRESHOLD consecutive abandoned round-trips
+            # before treating this as a liveness failure, so a single
+            # transient blip doesn't force a reconnect on its own.
+            self._consecutive_sync_failures += 1
+            if self._consecutive_sync_failures >= self.SYNC_FAILURE_THRESHOLD:
+                _LOGGER.warning(
+                    "Zone sync abandoned %d times in a row - treating device as unreachable",
+                    self._consecutive_sync_failures,
+                )
+                self._sync_unreachable = True
+
+            if result_future is not None and not result_future.done():
+                result_future.set_result(False)
+
             return leftover if leftover else None
 
         # Still waiting on more data to complete the sync response.
@@ -1004,7 +1104,14 @@ class MatrioController:
         consumed_end = sig_pos + len(hng_hex) // 2 if sig_pos != -1 else len(self._sync_buffer)
         leftover = self._sync_buffer[consumed_end:]
 
+        result_future = self._sync_result_future
         self._reset_sync_state()
+        # A complete packet was received - the round-trip itself succeeded
+        # at the transport level (independent of whether the payload below
+        # decodes cleanly), so the device has proven it's reachable.
+        self._consecutive_sync_failures = 0
+        if result_future is not None and not result_future.done():
+            result_future.set_result(True)
 
         try:
             result = self.hng_decoder.decode_hng_sync_packet(hng_hex, self.inputs)
@@ -1021,6 +1128,8 @@ class MatrioController:
         self._awaiting_sync = False
         self._sync_buffer = b""
         self._sync_chunk_count = 0
+        self._sync_unreachable = False
+        self._sync_result_future = None
 
     def _handle_full_sync(self, hng_result: Dict[str, Any]) -> None:
         """Merge a decoded full zone-status sync into self.zones and notify."""
@@ -1050,8 +1159,12 @@ class MatrioController:
         try:
             upnp_port = 59152
             
-            # Subscribe to rendertransport1 events
-            local_ip = self._get_local_ip()
+            # Subscribe to rendertransport1 events. _get_local_ip does a
+            # blocking synchronous socket.connect(), so run it in an executor
+            # rather than stalling the HA event loop.
+            local_ip = await asyncio.get_running_loop().run_in_executor(
+                None, self._get_local_ip
+            )
             subscribe_request1 = (
                 "SUBSCRIBE /upnp/event/rendertransport1 HTTP/1.1\r\n"
                 f"Host: {self.ip}:{upnp_port}\r\n"
@@ -1123,7 +1236,7 @@ class MatrioController:
             return True
             
         except Exception as e:
-            print(f"UPnP subscription failed: {e}")
+            _LOGGER.error(f"UPnP subscription failed: {e}")
             return False
     
     async def _send_soap_commands(self) -> bool:
@@ -1192,7 +1305,7 @@ class MatrioController:
             return True
             
         except Exception as e:
-            print(f"SOAP commands failed: {e}")
+            _LOGGER.error(f"SOAP commands failed: {e}")
             return False
     
     async def _send_binary_initialization(self) -> bool:
@@ -1309,9 +1422,54 @@ class MatrioController:
         self.reader = None
         self.writer = None
         self._reset_sync_state()
+        self._pending_command_response = None
+        self._consecutive_sync_failures = 0
         _LOGGER.info("Disconnected from Matrio device")
-    
-    
+
+    async def _send_and_await_response(self, packet: bytes, timeout: float = 2.0) -> bool:
+        """
+        Write a command packet and wait for its ack, without racing the
+        persistent _reader_loop for reads.
+
+        Serialized by _command_lock so only one command's write-then-await
+        cycle is ever in flight at a time - a rapid burst of commands (e.g.
+        turn_on immediately followed by select_source/volume_set) is
+        processed one full round-trip at a time instead of each racing its
+        own reader.read() against _reader_loop's, which could otherwise
+        steal or drop another command's ack. The response itself is
+        delivered by _reader_loop into _pending_command_response.
+
+        writer.drain() is separately bounded by COMMAND_WRITE_TIMEOUT (it's
+        local socket buffering, not waiting on the device, so it should
+        always be fast) so a wedged TCP send buffer can't hold
+        _command_lock - and every other queued command/sync request behind
+        it - indefinitely.
+
+        Uses a locally-captured reference to the pending future (rather
+        than re-reading self._pending_command_response after the await
+        points below) so a concurrent connect()/disconnect() clearing that
+        attribute can't turn this into an `await None` crash - worst case,
+        a torn-down connection just means nothing ever resolves this
+        command's own future, and it times out normally instead.
+        """
+        if not self.writer:
+            return False
+
+        async with self._command_lock:
+            pending = asyncio.get_running_loop().create_future()
+            self._pending_command_response = pending
+            try:
+                self.writer.write(packet)
+                await asyncio.wait_for(self.writer.drain(), timeout=self.COMMAND_WRITE_TIMEOUT)
+                response = await asyncio.wait_for(pending, timeout=timeout)
+                return len(response) > 0
+            except Exception as e:
+                _LOGGER.debug("Command failed with exception: %s", e)
+                return False
+            finally:
+                if self._pending_command_response is pending:
+                    self._pending_command_response = None
+
     async def _send_input_command(self, zone_id: int, input_id: int) -> bool:
         """
         Send input command using the correct protocol discovered from capture analysis
@@ -1353,24 +1511,9 @@ class MatrioController:
         _LOGGER.debug("Sending packet: %s", packet.hex())
         _LOGGER.debug("Packet length: %s bytes", len(packet))
         
-        try:
-            self.writer.write(packet)
-            await self.writer.drain()
-            _LOGGER.debug("Sent packet to device")
-            
-            # Wait for response
-            response = await asyncio.wait_for(self.reader.read(1024), timeout=2.0)
-            
-            if len(response) > 0:
-                _LOGGER.debug("Received response: %s...", response.hex()[:50])
-                return True
-            else:
-                _LOGGER.debug("No response received from device")
-                return False
-        except Exception as e:
-            _LOGGER.debug("Input command failed with exception: %s", e)
-            return False
-    
+        _LOGGER.debug("Sending packet to device")
+        return await self._send_and_await_response(packet)
+
     async def _send_power_command(self, zone_id: int, power_on: bool) -> bool:
         """
         Send power command using the correct protocol discovered from mobile app analysis
@@ -1383,7 +1526,7 @@ class MatrioController:
             return False
         
         if zone_id < 1 or zone_id > 8:
-            print(f"Invalid zone ID: {zone_id}. Must be 1-8")
+            _LOGGER.warning(f"Invalid zone ID: {zone_id}. Must be 1-8")
             return False
         
         try:
@@ -1408,22 +1551,22 @@ class MatrioController:
             # Create packet
             packet_hex = f"18961820{length:02x}000000{command_code}000000000000000000004d43552b5041532b8208{pattern_hex}ffcc26"
             packet = bytes.fromhex(packet_hex)
-            
-            self.writer.write(packet)
-            await self.writer.drain()
-            
-            # Wait for response
-            response = await asyncio.wait_for(self.reader.read(1024), timeout=2.0)
-            
-            if len(response) > 0:
-                print(f"Zone {zone_id} power {'ON' if power_on else 'OFF'} command sent successfully")
-                return True
+
+            # Powering on from deep standby can take the amp 5-10s to wake,
+            # vs. the ~2s a normal command ack takes - use a longer timeout
+            # here so _command_lock isn't released (letting a queued
+            # follow-on command's packet go out) until the amp has actually
+            # finished waking or genuinely failed to respond.
+            timeout = 10.0 if power_on else 2.0
+            result = await self._send_and_await_response(packet, timeout=timeout)
+            if result:
+                _LOGGER.debug(f"Zone {zone_id} power {'ON' if power_on else 'OFF'} command sent successfully")
             else:
-                print(f"Zone {zone_id} power {'ON' if power_on else 'OFF'} command failed - no response")
-                return False
-                
+                _LOGGER.debug(f"Zone {zone_id} power {'ON' if power_on else 'OFF'} command failed - no response")
+            return result
+
         except Exception as e:
-            print(f"Power command failed: {e}")
+            _LOGGER.error(f"Power command failed: {e}")
             return False
     
     async def _send_volume_command(self, zone_id: int, volume: int) -> bool:
@@ -1438,11 +1581,11 @@ class MatrioController:
             return False
         
         if zone_id < 1 or zone_id > 8:
-            print(f"Invalid zone ID: {zone_id}. Must be 1-8")
+            _LOGGER.warning(f"Invalid zone ID: {zone_id}. Must be 1-8")
             return False
         
         if volume < 0 or volume > 38:
-            print(f"Invalid volume: {volume}. Must be 0-38")
+            _LOGGER.warning(f"Invalid volume: {volume}. Must be 0-38")
             return False
         
         try:
@@ -1465,22 +1608,16 @@ class MatrioController:
             # Create packet using exact format from packet capture
             packet_hex = f"1896182016000000{command_code}000000000000000000004d43552b5041532b8201{pattern}ffcc26"
             packet = bytes.fromhex(packet_hex)
-            
-            self.writer.write(packet)
-            await self.writer.drain()
-            
-            # Wait for response
-            response = await asyncio.wait_for(self.reader.read(1024), timeout=2.0)
-            
-            if len(response) > 0:
-                print(f"Zone {zone_id} volume: {volume}")
-                return True
+
+            result = await self._send_and_await_response(packet)
+            if result:
+                _LOGGER.debug(f"Zone {zone_id} volume: {volume}")
             else:
-                print(f"Zone {zone_id} volume command failed - no response")
-                return False
-                
+                _LOGGER.debug(f"Zone {zone_id} volume command failed - no response")
+            return result
+
         except Exception as e:
-            print(f"Volume command failed: {e}")
+            _LOGGER.error(f"Volume command failed: {e}")
             return False
     
     async def _send_mute_command(self, zone_id: int, mute: bool) -> bool:
@@ -1495,7 +1632,7 @@ class MatrioController:
             return False
         
         if zone_id < 1 or zone_id > 8:
-            print(f"Invalid zone ID: {zone_id}. Must be 1-8")
+            _LOGGER.warning(f"Invalid zone ID: {zone_id}. Must be 1-8")
             return False
         
         try:
@@ -1518,22 +1655,16 @@ class MatrioController:
             # Create packet using exact format from packet capture
             packet_hex = f"1896182016000000{command_code}000000000000000000004d43552b5041532b820e{pattern}ffcc26"
             packet = bytes.fromhex(packet_hex)
-            
-            self.writer.write(packet)
-            await self.writer.drain()
-            
-            # Wait for response
-            response = await asyncio.wait_for(self.reader.read(1024), timeout=2.0)
-            
-            if len(response) > 0:
-                print(f"Zone {zone_id} mute: {'ON' if mute else 'OFF'}")
-                return True
+
+            result = await self._send_and_await_response(packet)
+            if result:
+                _LOGGER.debug(f"Zone {zone_id} mute: {'ON' if mute else 'OFF'}")
             else:
-                print(f"Zone {zone_id} mute command failed - no response")
-                return False
-                
+                _LOGGER.debug(f"Zone {zone_id} mute command failed - no response")
+            return result
+
         except Exception as e:
-            print(f"Mute command failed: {e}")
+            _LOGGER.error(f"Mute command failed: {e}")
             return False
     
     async def _send_name_command(self, command_type: int, item_id: int, name: str) -> bool:
@@ -1562,7 +1693,7 @@ class MatrioController:
             response = await asyncio.wait_for(self.reader.read(1024), timeout=2.0)
             return len(response) > 0
         except Exception as e:
-            print(f"Name command failed: {e}")
+            _LOGGER.error(f"Name command failed: {e}")
             return False
     
     
@@ -1570,21 +1701,21 @@ class MatrioController:
     async def set_zone_name(self, zone_id: int, name: str) -> bool:
         """Set zone name (zones 1-8)"""
         if zone_id < 1 or zone_id > 8:
-            print(f"Invalid zone ID: {zone_id}. Must be 1-8")
+            _LOGGER.warning(f"Invalid zone ID: {zone_id}. Must be 1-8")
             return False
         result = await self._send_name_command(0x01, zone_id, name)
         if result:
-            print(f"Zone {zone_id} renamed to: {name}")
+            _LOGGER.debug(f"Zone {zone_id} renamed to: {name}")
         return result
     
     async def set_input_name(self, input_id: int, name: str) -> bool:
         """Set input name (inputs 1-8)"""
         if input_id < 1 or input_id > 8:
-            print(f"Invalid input ID: {input_id}. Must be 1-8")
+            _LOGGER.warning(f"Invalid input ID: {input_id}. Must be 1-8")
             return False
         result = await self._send_name_command(0x02, input_id, name)
         if result:
-            print(f"Input {input_id} renamed to: {name}")
+            _LOGGER.debug(f"Input {input_id} renamed to: {name}")
         return result
     
     # Individual Zone Controls
@@ -1595,12 +1726,12 @@ class MatrioController:
     async def set_volume(self, zone_id: int, volume: int) -> bool:
         """Set volume for individual zone (0-38) using correct protocol"""
         if zone_id < 1 or zone_id > 8:
-            print(f"Invalid zone ID: {zone_id}. Must be 1-8")
+            _LOGGER.warning(f"Invalid zone ID: {zone_id}. Must be 1-8")
             return False
         
         # Volume range matches mobile app: 0-38
         if volume < 0 or volume > 38:
-            print(f"Invalid volume: {volume}. Must be 0-38")
+            _LOGGER.warning(f"Invalid volume: {volume}. Must be 0-38")
             return False
         
         return await self._send_volume_command(zone_id, volume)
@@ -1608,7 +1739,7 @@ class MatrioController:
     async def set_mute(self, zone_id: int, mute: bool) -> bool:
         """Mute/unmute individual zone using correct protocol"""
         if zone_id < 1 or zone_id > 8:
-            print(f"Invalid zone ID: {zone_id}. Must be 1-8")
+            _LOGGER.warning(f"Invalid zone ID: {zone_id}. Must be 1-8")
             return False
         
         return await self._send_mute_command(zone_id, mute)
@@ -1674,7 +1805,7 @@ class MatrioController:
                 data = bytes.fromhex("a90800000000000000000000")
                 payload = bytes.fromhex("4d43552b5041532b820c0108080808080808070f22171d0805050d0d0d0d0d0d0d0d0d0d0d0d0d0d0d1f1f1f1f1f1f1f1f02010201010101010101010102010101010140180c14ffffcc26")
             else:
-                print(f"Unknown command: 0x{command:02x}")
+                _LOGGER.warning(f"Unknown command: 0x{command:02x}")
                 return None
             
             # Construct packet
@@ -1697,12 +1828,12 @@ class MatrioController:
                 # Wait for ACK
                 ack = await asyncio.wait_for(self.reader.read(1024), timeout=5.0)
                 if len(ack) == 0:
-                    print("Received ACK")
+                    _LOGGER.debug("Received ACK")
                 
                 # Wait for 0x0c response (this is actually the ALLNAMES packet)
                 response = await asyncio.wait_for(self.reader.read(1024), timeout=5.0)
                 if len(response) > 0:
-                    print(f"Received response: {len(response)} bytes")
+                    _LOGGER.debug(f"Received response: {len(response)} bytes")
                     # This is the ALLNAMES packet, return it directly
                     return response
                 
@@ -1713,7 +1844,7 @@ class MatrioController:
                 return response if len(response) > 0 else None
                 
         except Exception as e:
-            print(f"Protocol command failed: {e}")
+            _LOGGER.error(f"Protocol command failed: {e}")
             return None
     
     async def check_heartbeat(self) -> bool:
@@ -1920,11 +2051,11 @@ class MatrioController:
             bool: True if command sent successfully
         """
         if not self.writer:
-            print("Not connected to device")
+            _LOGGER.warning("Not connected to device")
             return False
         
         if zone_id < 1 or zone_id > 8:
-            print(f"Invalid zone ID: {zone_id}. Must be 1-8")
+            _LOGGER.warning(f"Invalid zone ID: {zone_id}. Must be 1-8")
             return False
         
         # Map control types to command codes
@@ -1935,7 +2066,7 @@ class MatrioController:
         }
         
         if control_type not in command_codes:
-            print(f"Invalid control type: {control_type}. Must be 'balance', 'bass', or 'treble'")
+            _LOGGER.warning(f"Invalid control type: {control_type}. Must be 'balance', 'bass', or 'treble'")
             return False
         
         command_code = command_codes[control_type]
@@ -1945,7 +2076,7 @@ class MatrioController:
             # Balance: -100 to +100 -> 0x01 to 0x3d (1 to 61)
             # Based on MatrioLog13.txt: 0x01=min left, 0x1f=middle, 0x3d=max right
             if value < -100 or value > 100:
-                print(f"Invalid balance value: {value}. Must be -100 to +100")
+                _LOGGER.warning(f"Invalid balance value: {value}. Must be -100 to +100")
                 return False
             
             # Use exact values from logs
@@ -1969,7 +2100,7 @@ class MatrioController:
             # Bass/Treble: -12 to +12 -> 0x01 to 0x19 (1 to 25)
             # Based on actual UI mapping: 0x01=-12, 0x0d=0, 0x19=+12
             if value < -12 or value > 12:
-                print(f"Invalid {control_type} value: {value}. Must be -12 to +12")
+                _LOGGER.warning(f"Invalid {control_type} value: {value}. Must be -12 to +12")
                 return False
             
             # Use the correct UI to hex conversion (limited range)
@@ -1984,21 +2115,16 @@ class MatrioController:
         packet = bytes.fromhex(packet_hex)
         
         try:
-            self.writer.write(packet)
-            await self.writer.drain()
-            
-            # Wait for response like other working commands
-            response = await asyncio.wait_for(self.reader.read(1024), timeout=2.0)
-            
-            if len(response) > 0:
-                print(f"Sent {control_type} command for zone {zone_id}: value={value} (0x{hex_value:02x}) - Response: {response.hex()[:20]}...")
+            result = await self._send_and_await_response(packet)
+            if result:
+                _LOGGER.debug(f"Sent {control_type} command for zone {zone_id}: value={value} (0x{hex_value:02x})")
                 return True
             else:
-                print(f"{control_type} command for zone {zone_id} failed - no response")
+                _LOGGER.debug(f"{control_type} command for zone {zone_id} failed - no response")
                 return False
                 
         except Exception as e:
-            print(f"Failed to send {control_type} command: {e}")
+            _LOGGER.debug(f"Failed to send {control_type} command: {e}")
             return False
 
 
@@ -2065,42 +2191,65 @@ class MatrioController:
 
     async def request_zone_sync(self) -> bool:
         """
-        Actively request a fresh full zone-status resync from the device.
+        Actively request a fresh full zone-status resync from the device,
+        and wait for that specific round-trip to complete.
 
-        This only writes the request packet - it never reads a response.
-        The response arrives asynchronously on the persistent _reader_loop
-        (which is the sole reader of self.reader) and is decoded there,
-        merged into self.zones, and delivered via state_callback exactly
-        like a broadcast. This is what lets the coordinator's periodic poll
-        catch device-initiated state changes (e.g. a firmware auto-timeout)
-        that the amp doesn't happen to broadcast, without racing the
-        persistent reader loop's own concurrent read of the same socket.
+        The write goes out here, but the response arrives asynchronously on
+        the persistent _reader_loop (which is the sole reader of
+        self.reader) and is decoded there, merged into self.zones, and
+        delivered via state_callback exactly like a broadcast - this call
+        just awaits the outcome _reader_loop reports back via
+        _sync_result_future (see _finish_sync / _process_sync_chunk).
+
+        Held under _command_lock for the whole round-trip (not just the
+        write) so this can never overlap with an in-flight zone command -
+        without that, a sync response and a command's ack could each get
+        delivered to the wrong waiter in _reader_loop.
+
+        Uses a locally-captured reference to the result future (rather than
+        re-reading self._sync_result_future after the await points below)
+        so a concurrent connect()/disconnect() clearing that attribute
+        can't turn this into an `await None` crash.
 
         Returns:
-            bool: True if the request was written successfully
+            bool: True if the device responded with a valid sync packet.
         """
         if not self.writer:
             _LOGGER.debug("request_zone_sync: not connected, skipping")
             return False
 
-        if self._awaiting_sync:
-            _LOGGER.debug("request_zone_sync: a sync request is already in flight, skipping")
-            return False
+        async with self._command_lock:
+            if self._awaiting_sync:
+                _LOGGER.debug("request_zone_sync: a sync request is already in flight, skipping")
+                return False
 
-        try:
             self._awaiting_sync = True
             self._sync_buffer = b""
             self._sync_chunk_count = 0
             self._sync_started_monotonic = time.monotonic()
+            sync_future = asyncio.get_running_loop().create_future()
+            self._sync_result_future = sync_future
 
-            self.writer.write(self.HNG_SYNC_REQUEST_PACKET)
-            await self.writer.drain()
-            _LOGGER.debug("Zone sync request sent")
-            return True
-        except Exception as e:
-            _LOGGER.error(f"Failed to send zone sync request: {e}")
-            self._reset_sync_state()
-            return False
+            try:
+                self.writer.write(self.HNG_SYNC_REQUEST_PACKET)
+                await asyncio.wait_for(self.writer.drain(), timeout=self.COMMAND_WRITE_TIMEOUT)
+                _LOGGER.debug("Zone sync request sent")
+            except Exception as e:
+                _LOGGER.error(f"Failed to send zone sync request: {e}")
+                self._reset_sync_state()
+                return False
+
+            try:
+                # _reader_loop resolves this via _finish_sync/_process_sync_chunk
+                # once the round-trip completes or is abandoned (bounded by
+                # SYNC_ABANDON_TIMEOUT). The extra margin here is only a
+                # defensive fallback in case _reader_loop itself stops
+                # ticking - it is not the primary timeout mechanism.
+                return await asyncio.wait_for(sync_future, timeout=self.SYNC_ABANDON_TIMEOUT + 2.0)
+            except asyncio.TimeoutError:
+                _LOGGER.warning("request_zone_sync: no result from reader loop past the abandon timeout")
+                self._reset_sync_state()
+                return False
 
     async def trigger_hng_sync(self) -> Dict[str, Any] | None:
         """
@@ -2194,15 +2343,29 @@ class MatrioController:
             # Extract the HNG sync packet - try both 68-byte and 96-byte sizes
             hng_start = hng_pos
             
-            # Try 96-byte packet first (more common in newer devices)
-            hng_end_96 = hng_start + 96
+            # A framed 68-byte response can be followed by another coalesced
+            # packet, so identify it by its terminator before using total
+            # buffered length to select the 96-byte form.
+            hng_end_68 = hng_start + self.SYNC_PACKET_SHORT_BYTES
+            if (
+                hng_end_68 <= len(data)
+                and data[hng_end_68 - len(self.SYNC_PACKET_TERMINATOR):hng_end_68]
+                == self.SYNC_PACKET_TERMINATOR
+            ):
+                hng_packet = data[hng_start:hng_end_68]
+                _LOGGER.debug("Extracted 68-byte HNG sync packet: %d bytes", len(hng_packet))
+                return hng_packet.hex()
+
+            hng_end_96 = hng_start + self.SYNC_PACKET_COMPLETE_BYTES
             if hng_end_96 <= len(data):
                 hng_packet = data[hng_start:hng_end_96]
                 _LOGGER.debug("Extracted 96-byte HNG sync packet: %d bytes", len(hng_packet))
                 return hng_packet.hex()
-            
-            # Fall back to 68-byte packet
-            hng_end_68 = hng_start + 68
+
+            # Preserve the generic extractor's existing short-packet fallback.
+            # The active sync path reaches this only after its completeness
+            # check has verified the terminator, so fragmented long packets
+            # are still held for more data there.
             if hng_end_68 <= len(data):
                 hng_packet = data[hng_start:hng_end_68]
                 _LOGGER.debug("Extracted 68-byte HNG sync packet: %d bytes", len(hng_packet))

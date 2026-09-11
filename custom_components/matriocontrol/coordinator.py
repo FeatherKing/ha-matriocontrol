@@ -62,14 +62,10 @@ class MatrioControlDataUpdateCoordinator(DataUpdateCoordinator):
                 connected = await self.controller.connect(state_callback)
                 if not connected:
                     _LOGGER.debug("Connection failed")
-                    return {
-                        "connected": False,
-                        "zones": {},
-                        "inputs": self.controller.get_available_inputs(),
-                        "device_info": {},
-                        "last_heartbeat": None,
-                        "zone_states": {},
-                    }
+                    raise UpdateFailed(
+                        f"Could not connect to Matrio device at "
+                        f"{self.entry.data['host']}:{self.entry.data['port']}"
+                    )
                 _LOGGER.debug("Connection successful")
 
             # Actively request a fresh full zone-status resync, throttled to
@@ -83,8 +79,14 @@ class MatrioControlDataUpdateCoordinator(DataUpdateCoordinator):
             # otherwise call this far more often than once per interval.
             now = time.monotonic()
             if now - self._last_sync_request_monotonic >= UPDATE_INTERVAL.total_seconds():
-                if await self.controller.request_zone_sync():
-                    self._last_sync_request_monotonic = now
+                # Throttle by attempt, not by success. Broadcasts trigger a
+                # refresh each, so advancing this only on success would let a
+                # failed sync retry immediately - collapsing the
+                # SYNC_FAILURE_THRESHOLD window down to back-to-back retries.
+                self._last_sync_request_monotonic = now
+                sync_succeeded = await self.controller.request_zone_sync()
+                if not sync_succeeded and not self.controller.connected:
+                    raise UpdateFailed("Connection lost while refreshing zone state")
 
             # Get current zone states from the controller
             zone_states = self.controller.zones.copy()
@@ -145,18 +147,14 @@ class MatrioControlDataUpdateCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("Zone states data: %s", zone_states)
             return result
             
+        except UpdateFailed:
+            # Already the right type - let HA mark entities unavailable.
+            raise
         except Exception as err:
             _LOGGER.debug("Coordinator update failed with error: %s", err)
-            _LOGGER.error("Error communicating with Matrio device: %s", err)
-            return {
-                "connected": False,
-                "zones": {},
-                "inputs": self.controller.get_available_inputs(),
-                "device_info": {},
-                "names": {},
-                "last_heartbeat": None,
-                "zone_states": {},
-            }
+            # Raise UpdateFailed so HA marks entities unavailable instead of
+            # serving an empty/stale dict as if it were fresh, valid data.
+            raise UpdateFailed(f"Error communicating with Matrio device: {err}") from err
     
     def register_entity(self, entity):
         """Register an entity for direct state updates."""
