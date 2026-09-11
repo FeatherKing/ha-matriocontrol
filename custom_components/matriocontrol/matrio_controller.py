@@ -498,6 +498,11 @@ class MatrioController:
     # queued command/sync request behind it.
     COMMAND_WRITE_TIMEOUT = 2.0
 
+    # A Matrio device can accept the TCP connection before its protocol
+    # services are ready (notably just after a reboot).  Keep startup
+    # recovery bounded so Home Assistant is not held up indefinitely.
+    CONNECT_RETRY_DELAYS = (1.0, 2.0, 4.0)
+
     # Supported HNG sync packet sizes. A short packet is complete before the
     # 96-byte threshold only when its protocol terminator is present; that
     # distinguishes it from the first 68 bytes of a fragmented long packet.
@@ -596,6 +601,27 @@ class MatrioController:
         
     async def connect(self, state_callback: Optional[Callable] = None) -> bool:
         """Connect to Matrio-compatible device and start reader/writer tasks"""
+        for attempt in range(1, len(self.CONNECT_RETRY_DELAYS) + 2):
+            if await self._connect_once(state_callback):
+                return True
+
+            if attempt <= len(self.CONNECT_RETRY_DELAYS):
+                delay = self.CONNECT_RETRY_DELAYS[attempt - 1]
+                _LOGGER.warning(
+                    "Matrio startup attempt %d failed; retrying in %.0f seconds",
+                    attempt,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+
+        _LOGGER.error(
+            "Unable to initialize Matrio controller after %d startup attempts",
+            len(self.CONNECT_RETRY_DELAYS) + 1,
+        )
+        return False
+
+    async def _connect_once(self, state_callback: Optional[Callable] = None) -> bool:
+        """Attempt one complete TCP and protocol initialization sequence."""
         try:
             _LOGGER.debug(f"Attempting to connect to Matrio device at {self.ip}:{self.port}")
 
@@ -642,11 +668,12 @@ class MatrioController:
                 _LOGGER.info("Matrio controller fully connected and ready")
                 return True
             else:
-                _LOGGER.error("Device initialization failed")
+                _LOGGER.debug("Device initialization did not complete")
                 await self.disconnect()
                 return False
         except Exception as e:
-            _LOGGER.error(f"Connection failed: {e}")
+            _LOGGER.debug("Connection attempt failed: %s", e)
+            await self.disconnect()
             return False
     
     async def _initialize_device(self) -> bool:
@@ -658,21 +685,21 @@ class MatrioController:
             _LOGGER.debug("Step 1: Setting up UPnP event subscriptions...")
             # Step 1: UPnP Event Subscriptions
             if not await self._setup_upnp_subscriptions():
-                _LOGGER.error("UPnP event subscriptions failed")
+                _LOGGER.debug("UPnP event subscriptions failed")
                 return False
             _LOGGER.debug("UPnP event subscriptions completed successfully")
             
             _LOGGER.debug("Step 2: Sending SOAP commands...")
             # Step 2: SOAP Commands
             if not await self._send_soap_commands():
-                _LOGGER.error("SOAP commands failed")
+                _LOGGER.debug("SOAP commands failed")
                 return False
             _LOGGER.debug("SOAP commands completed successfully")
             
             _LOGGER.debug("Step 3: Binary protocol initialization...")
             # Step 3: Binary Protocol Initialization
             if not await self._send_binary_initialization():
-                _LOGGER.error("Binary protocol initialization failed")
+                _LOGGER.debug("Binary protocol initialization failed")
                 return False
             _LOGGER.debug("Binary protocol initialization completed successfully")
             
@@ -680,7 +707,7 @@ class MatrioController:
             return True
             
         except Exception as e:
-            _LOGGER.error(f"Device initialization failed: {e}")
+            _LOGGER.debug("Device initialization failed: %s", e)
             return False
     
     async def _reader_loop(self):
@@ -788,7 +815,12 @@ class MatrioController:
                 _LOGGER.debug("No zone data or state callback available")
                 
         except Exception as e:
-            _LOGGER.error(f"Failed to get initial state: {e}")
+            # Initial state has already been decoded during binary startup.
+            # A callback can fail while Home Assistant is still bringing up
+            # its event loop; the coordinator's normal refresh path will
+            # publish the cached state instead of treating this as a failed
+            # device connection.
+            _LOGGER.warning("Initial-state callback failed; it will be retried by the next refresh: %s", e)
     
     def _parse_allnames_response(self, response: bytes) -> Dict[str, str]:
         """Parse ALLNAMES response to extract zone and input names"""
@@ -1236,7 +1268,7 @@ class MatrioController:
             return True
             
         except Exception as e:
-            _LOGGER.error(f"UPnP subscription failed: {e}")
+            _LOGGER.debug("UPnP subscription failed: %s", e)
             return False
     
     async def _send_soap_commands(self) -> bool:
@@ -1305,12 +1337,16 @@ class MatrioController:
             return True
             
         except Exception as e:
-            _LOGGER.error(f"SOAP commands failed: {e}")
+            _LOGGER.debug("SOAP commands failed: %s", e)
             return False
     
     async def _send_binary_initialization(self) -> bool:
         """Send binary protocol initialization sequence"""
         try:
+            if self.reader is None or self.writer is None:
+                _LOGGER.debug("Binary initialization skipped without an active connection")
+                return False
+
             # Send initialization command (0x0a)
             self.writer.write(self.HNG_SYNC_REQUEST_PACKET)
             await self.writer.drain()
@@ -1385,7 +1421,7 @@ class MatrioController:
             return True
             
         except Exception as e:
-            _LOGGER.error(f"Binary initialization failed: {e}")
+            _LOGGER.debug("Binary initialization failed: %s", e)
             return False
     
     async def disconnect(self):
@@ -1413,14 +1449,22 @@ class MatrioController:
                 pass
         
         # Close connection
-        if self.writer:
-            _LOGGER.debug("Closing writer connection...")
-            self.writer.close()
-            await self.writer.wait_closed()
-            _LOGGER.debug("Writer connection closed")
-        
+        writer = self.writer
         self.reader = None
         self.writer = None
+        if writer:
+            _LOGGER.debug("Closing writer connection...")
+            try:
+                writer.close()
+                await writer.wait_closed()
+                _LOGGER.debug("Writer connection closed")
+            except (AttributeError, OSError, RuntimeError) as err:
+                # The peer (or a prior teardown) may already have dropped the
+                # socket, making close()/wait_closed() raise. self.writer is
+                # already detached above, so swallowing this can't leak a
+                # stale reference - it just lets the caller's startup retry
+                # loop continue instead of aborting on a teardown error.
+                _LOGGER.debug("Writer cleanup after failed connection: %s", err)
         self._reset_sync_state()
         self._pending_command_response = None
         self._consecutive_sync_failures = 0
