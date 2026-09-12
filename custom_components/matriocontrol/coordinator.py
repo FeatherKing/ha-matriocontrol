@@ -6,6 +6,7 @@ import logging
 import time
 from datetime import timedelta
 
+from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -15,11 +16,23 @@ from .matrio_controller import MatrioController
 
 _LOGGER = logging.getLogger(__name__)
 
+# Stable per-entry ID so repeated failures update the same notification
+# instead of stacking up duplicates, and so it can be dismissed on recovery.
+_UNREACHABLE_NOTIFICATION_ID = "matriocontrol_unreachable_{entry_id}"
+
 # Broadcasts drive near-real-time updates the rest of the time; this interval
 # is also used to throttle an active zone-status resync request (see
 # _async_update_data) that catches device-initiated state changes (e.g. a
 # firmware auto-timeout) the amp doesn't happen to broadcast on its own.
-UPDATE_INTERVAL = timedelta(seconds=60)
+UPDATE_INTERVAL = timedelta(seconds=20)
+
+# Used instead of UPDATE_INTERVAL to throttle the *next* sync attempt when
+# the previous one failed (see has_pending_sync_failure) - retries sooner so
+# the controller's required consecutive-failure count is reached in a couple
+# of short retries instead of a full UPDATE_INTERVAL between each one, while
+# still requiring the same number of consecutive failures to avoid flagging
+# a single transient blip as unreachable.
+RETRY_INTERVAL = timedelta(seconds=5)
 
 
 class MatrioControlDataUpdateCoordinator(DataUpdateCoordinator):
@@ -36,6 +49,7 @@ class MatrioControlDataUpdateCoordinator(DataUpdateCoordinator):
         # -inf so the very first eligible tick always fires a sync request,
         # regardless of how long the process/system has been up.
         self._last_sync_request_monotonic = float("-inf")
+        self._unreachable_notified = False
 
         super().__init__(
             hass,
@@ -78,7 +92,10 @@ class MatrioControlDataUpdateCoordinator(DataUpdateCoordinator):
             # async_request_refresh() on every broadcast, which would
             # otherwise call this far more often than once per interval.
             now = time.monotonic()
-            if now - self._last_sync_request_monotonic >= UPDATE_INTERVAL.total_seconds():
+            throttle = (
+                RETRY_INTERVAL if self.controller.has_pending_sync_failure else UPDATE_INTERVAL
+            )
+            if now - self._last_sync_request_monotonic >= throttle.total_seconds():
                 # Throttle by attempt, not by success. Broadcasts trigger a
                 # refresh each, so advancing this only on success would let a
                 # failed sync retry immediately - collapsing the
@@ -86,7 +103,17 @@ class MatrioControlDataUpdateCoordinator(DataUpdateCoordinator):
                 self._last_sync_request_monotonic = now
                 sync_succeeded = await self.controller.request_zone_sync()
                 if not sync_succeeded and not self.controller.connected:
+                    self.update_interval = UPDATE_INTERVAL
                     raise UpdateFailed("Connection lost while refreshing zone state")
+
+                # Also drive the coordinator's own poll cadence, not just this
+                # request's internal throttle above - otherwise a failed sync
+                # still waits a full UPDATE_INTERVAL before the coordinator
+                # even calls in again, and the shorter RETRY_INTERVAL above
+                # never has a chance to matter.
+                self.update_interval = (
+                    RETRY_INTERVAL if self.controller.has_pending_sync_failure else UPDATE_INTERVAL
+                )
 
             # Get current zone states from the controller
             zone_states = self.controller.zones.copy()
@@ -145,16 +172,42 @@ class MatrioControlDataUpdateCoordinator(DataUpdateCoordinator):
             }
             _LOGGER.debug("Coordinator update successful, returning data with %d zone states", len(zone_states))
             _LOGGER.debug("Zone states data: %s", zone_states)
+            self._dismiss_unreachable_notification()
             return result
-            
-        except UpdateFailed:
+
+        except UpdateFailed as err:
             # Already the right type - let HA mark entities unavailable.
+            self._notify_unreachable(str(err))
             raise
         except Exception as err:
             _LOGGER.debug("Coordinator update failed with error: %s", err)
             # Raise UpdateFailed so HA marks entities unavailable instead of
             # serving an empty/stale dict as if it were fresh, valid data.
+            self._notify_unreachable(str(err))
             raise UpdateFailed(f"Error communicating with Matrio device: {err}") from err
+
+    def _notify_unreachable(self, reason: str) -> None:
+        """Create a persistent notification the first time this entry's
+        device is confirmed unreachable (not on every failed poll)."""
+        if self._unreachable_notified:
+            return
+        self._unreachable_notified = True
+        persistent_notification.async_create(
+            self.hass,
+            f"The Matrio device at {self.entry.data['host']} is unreachable: {reason}. "
+            "Zone controls will be unavailable until it reconnects.",
+            title="Matrio Control device unreachable",
+            notification_id=_UNREACHABLE_NOTIFICATION_ID.format(entry_id=self.entry.entry_id),
+        )
+
+    def _dismiss_unreachable_notification(self) -> None:
+        """Clear the unreachable notification once the device responds again."""
+        if not self._unreachable_notified:
+            return
+        self._unreachable_notified = False
+        persistent_notification.async_dismiss(
+            self.hass, _UNREACHABLE_NOTIFICATION_ID.format(entry_id=self.entry.entry_id)
+        )
     
     def register_entity(self, entity):
         """Register an entity for direct state updates."""

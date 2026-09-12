@@ -57,58 +57,50 @@ class UniversalHNGSyncDecoder:
         # Decode each zone
         for zone in range(8):
             zone_num = zone + 1
-            zone_data = self.decode_zone(zone, packet, hng_start, len(packet), input_mappings)
+            zone_data = self.decode_zone(zone, packet, hng_start, input_mappings)
             result['zones'][zone_num] = zone_data
         
         return result
     
-    def decode_zone(self, zone: int, packet: bytes, hng_start: int, packet_size: int, input_mappings: Dict[int, str]) -> Dict[str, Any]:
-        """Decode individual zone data based on packet size"""
-        
+    def decode_zone(self, zone: int, packet: bytes, hng_start: int, input_mappings: Dict[int, str]) -> Dict[str, Any]:
+        """Decode individual zone data"""
+
+        # Input, volume, power, and mute all use the same byte offsets and
+        # value conventions regardless of packet size (68-byte packets were
+        # confirmed against a live capture with a single known zone toggled
+        # - see decode_power_state/decode_mute_state).
         # Input state
-        if packet_size == 96:
-            input_start = hng_start + 2  # bytes 2-9 in HNG section
-        else:  # 68-byte packet
-            input_start = hng_start + 2  # bytes 2-9
+        input_start = hng_start + 2  # bytes 2-9
         input_val = packet[input_start + zone]
         input_name = self.decode_input_selection(input_val, input_mappings)
-        
+
         # Volume state
-        if packet_size == 96:
-            volume_start = hng_start + 10  # bytes 10-17 in HNG section
-        else:  # 68-byte packet
-            volume_start = hng_start + 10  # bytes 10-17
+        volume_start = hng_start + 10  # bytes 10-17
         volume_val = packet[volume_start + zone]
         volume = self.decode_volume_level(volume_val)
-        
+
         # Power state
-        if packet_size == 96:
-            power_start = hng_start + 44  # bytes 44-51 in HNG section
-        else:  # 68-byte packet
-            power_start = hng_start + 50  # bytes 50-57
+        power_start = hng_start + 44  # bytes 44-51
         power_val = packet[power_start + zone]
-        power = self.decode_power_state(power_val, packet_size)
-        
+        power = self.decode_power_state(power_val)
+
         # Balance state
         # Confirmed by differential analysis: balance is at position 34 + zone_index
         balance_start = hng_start + 34
         balance_val = packet[balance_start + zone]
-        balance = self.decode_balance_state(balance_val, packet_size)
-        
-        # Mute state
-        if packet_size == 96:
-            mute_start = hng_start + 52  # bytes 52-59 in HNG section
-        else:  # 68-byte packet
-            mute_start = hng_start + 28  # bytes 28-35
+        balance = self.decode_balance_state(balance_val)
+
+        # Mute state - immediately follows power
+        mute_start = hng_start + 52  # bytes 52-59
         mute_val = packet[mute_start + zone]
-        mute = self.decode_mute_state(mute_val, packet_size)
-        
+        mute = self.decode_mute_state(mute_val)
+
         # Bass and treble state - decode from specific byte positions
-        bass, treble = self.decode_bass_treble(zone, packet, hng_start, packet_size)
-        
+        bass, treble = self.decode_bass_treble(zone, packet, hng_start)
+
         # Get raw bass and treble values for raw_data
-        bass_start = self.get_bass_start(hng_start, packet_size)
-        treble_start = self.get_treble_start(hng_start, packet_size)
+        bass_start = self.get_bass_start(hng_start)
+        treble_start = self.get_treble_start(hng_start)
         bass_val = packet[bass_start + zone]
         treble_val = packet[treble_start + zone]
         
@@ -132,24 +124,16 @@ class UniversalHNGSyncDecoder:
             }
         }
     
-    def decode_power_state(self, power: int, packet_size: int) -> str:
-        """Decode zone power state based on packet size"""
-        if packet_size == 96:
-            # 96-byte packet: 0x02=ON, 0x01=OFF
-            if power == 0x02:
-                return "ON"
-            elif power == 0x01:
-                return "OFF"
-            else:
-                return f"UNKNOWN(0x{power:02x})"
+    def decode_power_state(self, power: int) -> str:
+        """Decode zone power state - same convention for both packet sizes
+        (0x02=ON, 0x01=OFF), matching BroadcastDecoder's live power
+        broadcasts."""
+        if power == 0x02:
+            return "ON"
+        elif power == 0x01:
+            return "OFF"
         else:
-            # 68-byte packet: 0x01=ON, 0x02=OFF (with reversed zone mapping)
-            if power == 0x01:
-                return "ON"
-            elif power == 0x02:
-                return "OFF"
-            else:
-                return f"UNKNOWN(0x{power:02x})"
+            return f"UNKNOWN(0x{power:02x})"
     
     def decode_input_selection(self, input_val: int, input_mappings: Dict[int, str]) -> str:
         """Decode zone input selection using device-provided input mappings"""
@@ -165,7 +149,7 @@ class UniversalHNGSyncDecoder:
         ui_volume = volume - 1
         return max(0, ui_volume)  # Ensure non-negative
     
-    def decode_balance_state(self, balance: int, packet_size: int) -> str:
+    def decode_balance_state(self, balance: int) -> str:
         """Decode zone balance state based on differential analysis"""
         # Based on differential analysis, balance values are:
         # 0x01 = MAX Left (-100), 0x1f = Center (0), 0x3d = MAX Right (+100)
@@ -185,41 +169,32 @@ class UniversalHNGSyncDecoder:
             else:
                 return f"UNKNOWN(0x{balance:02x})"
     
-    def decode_mute_state(self, mute: int, packet_size: int) -> str:
-        """Decode zone mute state based on packet size"""
-        if packet_size == 96:
-            # 96-byte packet: 0x01=Default, 0x02=Muted
-            if mute == 0x01:
-                return "DEFAULT"
-            elif mute == 0x02:
-                return "MUTED"
-            else:
-                return f"UNKNOWN(0x{mute:02x})"
+    def decode_mute_state(self, mute: int) -> str:
+        """Decode zone mute state - same convention for both packet sizes
+        (0x01=Default, 0x02=Muted)."""
+        if mute == 0x01:
+            return "DEFAULT"
+        elif mute == 0x02:
+            return "MUTED"
         else:
-            # 68-byte packet: 0x0d=Default, 0x02=Muted
-            if mute == 0x0d:
-                return "DEFAULT"
-            elif mute == 0x02:
-                return "MUTED"
-            else:
-                return f"UNKNOWN(0x{mute:02x})"
+            return f"UNKNOWN(0x{mute:02x})"
 
     
-    def get_bass_start(self, hng_start: int, packet_size: int) -> int:
+    def get_bass_start(self, hng_start: int) -> int:
         """Get the starting byte position for bass data"""
         # Confirmed by differential analysis: bass is at position 26 + zone_index
         return hng_start + 26
-    
-    def get_treble_start(self, hng_start: int, packet_size: int) -> int:
+
+    def get_treble_start(self, hng_start: int) -> int:
         """Get the starting byte position for treble data"""
         # Confirmed by differential analysis: treble is at position 18 + zone_index
         return hng_start + 18
-    
-    def decode_bass_treble(self, zone: int, packet: bytes, hng_start: int, packet_size: int) -> tuple[int, int]:
+
+    def decode_bass_treble(self, zone: int, packet: bytes, hng_start: int) -> tuple[int, int]:
         """Decode bass and treble values from HNG sync packet"""
-        
-        bass_start = self.get_bass_start(hng_start, packet_size)
-        treble_start = self.get_treble_start(hng_start, packet_size)
+
+        bass_start = self.get_bass_start(hng_start)
+        treble_start = self.get_treble_start(hng_start)
         
         bass_val = packet[bass_start + zone]
         treble_val = packet[treble_start + zone]
@@ -289,7 +264,15 @@ class BroadcastDecoder:
                 
             command = command_part[1]  # Skip 0x82, get command
             _LOGGER.debug(f"BroadcastDecoder: Extracted command: 0x{command:02x}")
-            
+
+            if command == 0x15:  # ALLNAMES: device sends this whenever zone/
+                # input names change, not just at connect time. Its payload
+                # is a run of length-prefixed name strings, not the 8-byte
+                # value+zone-pattern shape every other command uses, so it
+                # can't go through the 8-byte slice/_decode_command_data path
+                # below - decode it directly from the unsliced remainder.
+                return self._decode_names_command(command_part[2:])
+
             # Extract the actual broadcast data (skip 0x82 + command)
             if len(command_part) < 10:
                 _LOGGER.debug("BroadcastDecoder: Command part too short for broadcast data")
@@ -306,7 +289,57 @@ class BroadcastDecoder:
         except Exception as e:
             _LOGGER.error(f"BroadcastDecoder: Failed to decode command echo packet: {e}")
             return None
-    
+
+    def _decode_names_command(self, data: bytes) -> Optional[Dict[str, Any]]:
+        """Decode an ALLNAMES (0x15) payload: device name + 8 zone names +
+        8 input names, each a 1-byte-length-prefixed ASCII string. `data`
+        must start at the device name's length byte."""
+        try:
+            pos = 0
+            if pos >= len(data):
+                return None
+            device_name_len = data[pos]
+            pos += 1 + device_name_len
+
+            zone_names: Dict[int, str] = {}
+            for zone_id in range(1, 9):
+                if pos >= len(data):
+                    break
+                name_len = data[pos]
+                pos += 1
+                if pos + name_len > len(data):
+                    break
+                zone_names[zone_id] = data[pos:pos + name_len].decode('ascii', errors='ignore')[:16]
+                pos += name_len
+
+            input_names: Dict[int, str] = {}
+            for input_id in range(1, 9):
+                if pos >= len(data):
+                    break
+                name_len = data[pos]
+                pos += 1
+                if pos + name_len > len(data):
+                    break
+                input_names[input_id] = data[pos:pos + name_len].decode('ascii', errors='ignore')[:16]
+                pos += name_len
+
+            if not zone_names and not input_names:
+                _LOGGER.debug("BroadcastDecoder: ALLNAMES payload yielded no names")
+                return None
+
+            _LOGGER.debug(
+                "BroadcastDecoder: Decoded ALLNAMES - zones=%s inputs=%s", zone_names, input_names
+            )
+            return {
+                "type": "names",
+                "zone_names": zone_names,
+                "input_names": input_names,
+                "raw_command": "0x15",
+            }
+        except Exception as e:
+            _LOGGER.debug("BroadcastDecoder: Failed to decode ALLNAMES command: %s", e)
+            return None
+
     def _decode_direct_broadcast_packet(self, packet: bytes) -> Optional[Dict[str, Any]]:
         """Decode direct broadcast packet"""
         if len(packet) < 11:
@@ -575,7 +608,16 @@ class MatrioController:
             7: "Input7",
             8: "Input8"
         }
-    
+
+    @property
+    def has_pending_sync_failure(self) -> bool:
+        """True if the most recent zone-sync round-trip failed but hasn't
+        yet reached SYNC_FAILURE_THRESHOLD. The coordinator uses this to
+        retry sooner than its normal poll interval, so an unreachable device
+        is confirmed in a couple of short retries instead of waiting a full
+        poll interval between each of the required consecutive failures."""
+        return self._consecutive_sync_failures > 0
+
     def _get_local_ip(self) -> str:
         """
         Get the local IP address of this machine
@@ -736,12 +778,16 @@ class MatrioController:
 
                     if self._pending_command_response is not None and not self._pending_command_response.done():
                         # This chunk is the ack for an in-flight command sent
-                        # via _send_and_await_response() - deliver it there
-                        # instead of decoding it as a broadcast, matching how
-                        # these ack payloads were always handled (only ever
-                        # checked for non-zero length, never decoded).
+                        # via _send_and_await_response() - deliver it there.
+                        # It still falls through to normal broadcast decoding
+                        # below instead of `continue`-ing past it: a command
+                        # echo is itself a decodable broadcast (it carries the
+                        # zone/value the device actually applied), and the
+                        # device can coalesce it with a genuine unrelated
+                        # broadcast in the same read. Skipping decode here
+                        # used to silently drop that state update until the
+                        # next periodic resync caught up.
                         self._pending_command_response.set_result(data)
-                        continue
 
                     if self._awaiting_sync:
                         # This chunk is (part of) the response to an active
@@ -992,12 +1038,30 @@ class MatrioController:
         """Handle broadcast packet and update state"""
         try:
             change_type = broadcast_info['type']
+
+            if change_type == "names":
+                # Not zone-scoped like the broadcasts below - the device
+                # sends this whenever zone/input names are edited (e.g. from
+                # the mobile app), not just during initial connect, so it's
+                # the only reliable way to pick up a rename after startup.
+                zone_names = broadcast_info.get('zone_names', {})
+                input_names = broadcast_info.get('input_names', {})
+                if zone_names:
+                    self.zone_names.update(zone_names)
+                    _LOGGER.info("Zone names updated from device: %s", zone_names)
+                if input_names:
+                    self.inputs.update(input_names)
+                    _LOGGER.info("Input names updated from device: %s", input_names)
+                if (zone_names or input_names) and self.state_callback:
+                    self.state_callback(self.zones)
+                return
+
             zones = broadcast_info.get('zones', [])
             raw_command = broadcast_info.get('raw_command', 'unknown')
             raw_data = broadcast_info.get('raw_data', 'unknown')
-            
+
             _LOGGER.debug(f"Handling broadcast: type={change_type}, zones={zones}, command={raw_command}, data={raw_data}")
-            
+
             if not zones:
                 _LOGGER.debug(f"{change_type.upper()}: No zones affected")
                 return
@@ -1132,6 +1196,7 @@ class MatrioController:
 
     def _finish_sync(self, hng_hex: str) -> Optional[bytes]:
         """Decode an extracted HNG sync packet, merge it in, and reset sync state."""
+        _LOGGER.debug("DIAG hng_hex: %s", hng_hex)
         sig_pos = self._sync_buffer.find(b'\x82\x0c')
         consumed_end = sig_pos + len(hng_hex) // 2 if sig_pos != -1 else len(self._sync_buffer)
         leftover = self._sync_buffer[consumed_end:]
@@ -1174,7 +1239,7 @@ class MatrioController:
 
         for zone_id, zone_data in zones.items():
             self.zones.setdefault(zone_id, {})
-            for key in ('power', 'input', 'volume', 'mute', 'balance', 'bass', 'treble'):
+            for key in ('power', 'input', 'volume', 'mute', 'balance', 'bass', 'treble', 'raw_data'):
                 if key in zone_data:
                     self.zones[zone_id][key] = zone_data[key]
             _LOGGER.debug(f"Zone {zone_id} synced: {self.zones[zone_id]}")
@@ -1356,26 +1421,37 @@ class MatrioController:
             if len(sync_response) == 0:
                 return False
             
-            # Wait for ALLNAMES response
+            # Wait for the second response. Historically assumed to always be
+            # ALLNAMES (with the first always being the HNG sync reply), but
+            # a reconnect racing an in-flight sync request can make the
+            # device answer with two sync-shaped packets instead - so every
+            # response read here is checked by content below rather than by
+            # its position.
             allnames_response = await asyncio.wait_for(self.reader.read(1024), timeout=5.0)
             if len(allnames_response) == 0:
                 return False
-            
-            # Parse ALLNAMES response to get device names immediately
-            try:
-                _LOGGER.debug("ALLNAMES response length: %d bytes", len(allnames_response))
-                _LOGGER.debug("ALLNAMES response hex: %s", allnames_response.hex()[:100])
-                
-                allnames_data = self._parse_allnames_response(allnames_response)
-                _LOGGER.info("Parsed ALLNAMES data: %s", allnames_data)
-                
+
+            # Parse ALLNAMES response to get device names immediately. Try
+            # both reads rather than assuming allnames_response holds it -
+            # order between the two isn't guaranteed (see comment above).
+            allnames_data = None
+            for candidate in (allnames_response, sync_response):
+                try:
+                    _LOGGER.debug("Trying to parse as ALLNAMES: %d bytes", len(candidate))
+                    allnames_data = self._parse_allnames_response(candidate)
+                    _LOGGER.info("Parsed ALLNAMES data: %s", allnames_data)
+                    break
+                except Exception as e:
+                    _LOGGER.debug("Not a parseable ALLNAMES response: %s", e)
+
+            if allnames_data is not None:
                 # Update input mappings with actual device names
                 for i in range(1, 9):
                     input_key = f"input_{i}"
                     if input_key in allnames_data:
                         self.inputs[i] = allnames_data[input_key]
                         _LOGGER.debug("Updated input %d: %s", i, allnames_data[input_key])
-                
+
                 # Store zone names
                 self.zone_names = {}
                 for i in range(8):
@@ -1383,13 +1459,13 @@ class MatrioController:
                     if zone_key in allnames_data:
                         self.zone_names[i+1] = allnames_data[zone_key]
                         _LOGGER.debug("Updated zone %d: %s", i+1, allnames_data[zone_key])
-                        
-            except Exception as e:
-                _LOGGER.warning("Failed to parse ALLNAMES response: %s", e)
-                _LOGGER.debug("ALLNAMES response that failed to parse: %s", allnames_response.hex())
+            else:
+                _LOGGER.warning(
+                    "Neither initialization response contained parseable ALLNAMES data"
+                )
                 # Set default names if ALLNAMES parsing failed
                 self.zone_names = {i: f"Zone {i}" for i in range(1, 9)}
-            
+
             # Extract HNG sync data from the combined responses (like broadcast decoder)
             _LOGGER.debug("Extracting HNG sync data from combined responses...")
             combined_data = sync_response + allnames_response
